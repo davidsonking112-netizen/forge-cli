@@ -7,6 +7,7 @@ from contextlib import redirect_stdout
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from forge_agent.providers import MockProvider, OpenAICompatibleProvider, redact
 from forge_agent.worker import main
 
 
@@ -57,6 +58,39 @@ class WorkerTests(unittest.TestCase):
         events = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertTrue(any(event["type"] == "agent.plan" for event in events))
         self.assertTrue(any(event["type"] == "session.complete" and event["status"] == "completed" for event in events))
+
+    def test_provider_errors_are_redacted(self):
+        message = redact('api_key=sk-1234567890 secret=visible token=abc123')
+        self.assertIn('api_key=[REDACTED]', message)
+        self.assertIn('secret=[REDACTED]', message)
+        self.assertIn('token=[REDACTED]', message)
+        self.assertNotIn('abc123', message)
+
+    def test_provider_normalizes_tool_calls(self):
+        provider = OpenAICompatibleProvider.__new__(OpenAICompatibleProvider)
+        reply = provider._parse_payload({"choices": [{"message": {"content": "", "tool_calls": [{"id": "call-1", "function": {"name": "workspace.read", "arguments": '{"path":"README.md"}'}}]}}], "usage": {"total_tokens": 3}})
+        self.assertEqual(reply.tool_calls[0].name, "workspace.read")
+        self.assertEqual(reply.tool_calls[0].arguments["path"], "README.md")
+        self.assertEqual(reply.usage["total_tokens"], 3)
+
+    def test_streaming_provider_normalizes_fragments(self):
+        provider = OpenAICompatibleProvider.__new__(OpenAICompatibleProvider)
+        chunks = [
+            b'data: {"choices":[{"delta":{"content":"hello "}}]}\n\n',
+            b'data: {"choices":[{"delta":{"content":"world"}}]}\n\n',
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"workspace.read","arguments":"{\\"path\\":\\"README.md\\"}"}}]}}]}\n\n',
+            b'data: [DONE]\n\n',
+        ]
+        fragments = []
+        reply = provider._read_stream(chunks, fragments.append)
+        self.assertEqual("".join(fragments), "hello world")
+        self.assertEqual(reply.tool_calls[0].arguments["path"], "README.md")
+
+    def test_mock_provider_streams_text_callback(self):
+        fragments = []
+        reply = MockProvider().complete(messages=[{"role": "user", "content": "hello"}], tools=[], on_text=fragments.append)
+        self.assertEqual(reply.text, "Mock provider response for: hello")
+        self.assertEqual(fragments, [reply.text])
 
     def test_invalid_input_is_reported(self):
         output = io.StringIO()

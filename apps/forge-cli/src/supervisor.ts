@@ -13,6 +13,7 @@ import {
 } from "../../../packages/protocol/src/index.js";
 import { PolicyEngine, TOOL_METADATA, WorkspaceTools } from "./tools.js";
 import { SessionStore, type SessionRecord } from "./sessions.js";
+import { buildRepositoryContext } from "./context.js";
 
 export interface RunOptions {
   prompt: string;
@@ -46,6 +47,10 @@ export class ForgeSupervisor {
     const policy = new PolicyEngine(options.policy ?? "safe");
     const tools = new WorkspaceTools(workspace);
     const worker = this.startWorker();
+    const repositoryContext = await buildRepositoryContext(
+      workspace,
+      options.prompt,
+    );
     let sessionResult: RunResult | undefined;
     let approvalMode: "safe" | "session-approve" | "unsafe" = policy.mode;
 
@@ -158,9 +163,10 @@ export class ForgeSupervisor {
       type: "session.start" as const,
       workspace,
       policy: options.policy ?? "safe",
-      provider: "mock",
+      provider: process.env.FORGE_PROVIDER ?? "mock",
       capabilities: Object.keys(TOOL_METADATA),
       prompt: options.prompt,
+      context: repositoryContext,
     };
     await emit(startEvent);
     send(startEvent);

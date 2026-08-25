@@ -34,6 +34,7 @@ export interface SessionStartEvent extends BaseEvent {
   provider: string;
   capabilities: string[];
   prompt?: string;
+  context?: unknown;
 }
 
 export interface UserPromptEvent extends BaseEvent {

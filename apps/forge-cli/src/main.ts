@@ -9,8 +9,10 @@ import type {
   ToolProposalEvent,
 } from "../../../packages/protocol/src/index.js";
 import { ForgeSupervisor } from "./supervisor.js";
+import { FullScreenTui } from "./tui.js";
+import { WorkspaceTools } from "./tools.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 function usage(): string {
   return `Forge CLI v${VERSION}
@@ -22,11 +24,13 @@ Usage:
   forge doctor                           Check local runtime and worker readiness
   forge config show|path|set <key> <v>   Inspect or update local configuration
   forge session list|resume|export|delete Manage local sessions
+  forge undo <checkpoint-id>              Restore a Forge-managed checkpoint
 
 Options:
   --output text|json     Select rendering mode (default: text)
   --workspace <path>     Set the approved workspace root
   --policy safe           Use the default approval policy (default)
+  --simple               Disable the full-screen terminal workspace
   --help                 Show this help
   --version              Show the version
 `;
@@ -46,6 +50,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     "doctor",
     "config",
     "session",
+    "undo",
     "help",
   ]);
   const command = first && knownCommands.has(first) ? first : "interactive";
@@ -221,12 +226,43 @@ async function sessionCommand(args: ParsedArgs): Promise<number> {
     return 0;
   }
   const record = await supervisor.readSession(id);
-  if (action === "export" || action === "resume") {
+  if (action === "export") {
     console.log(JSON.stringify(record, null, 2));
     return 0;
   }
+  if (action === "resume") {
+    const start = record.events.find((event) => event.type === "session.start");
+    if (!start || start.type !== "session.start" || !start.prompt) {
+      console.error("This session does not contain a resumable prompt");
+      return 1;
+    }
+    return runTask({
+      command: "interactive",
+      positional: [start.prompt],
+      flags: { workspace: record.workspace },
+    });
+  }
   console.error("Usage: forge session list|resume|export|delete <id>");
   return 2;
+}
+
+async function undoCommand(args: ParsedArgs): Promise<number> {
+  const checkpoint = args.positional[0];
+  if (!checkpoint) {
+    console.error("Usage: forge undo <checkpoint-id> [--workspace <path>]");
+    return 2;
+  }
+  const workspace = path.resolve(
+    flagString(args.flags, "workspace", process.cwd()),
+  );
+  try {
+    await new WorkspaceTools(workspace).restoreCheckpoint(checkpoint);
+    console.log(`Restored checkpoint ${checkpoint} in ${workspace}`);
+    return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
 }
 
 async function runTask(args: ParsedArgs): Promise<number> {
@@ -241,6 +277,9 @@ async function runTask(args: ParsedArgs): Promise<number> {
   const interactive =
     !isJson && args.command === "interactive" && Boolean(input.isTTY);
   const rl = interactive ? createInterface({ input, output }) : undefined;
+  const tui =
+    interactive && args.flags.simple !== true ? new FullScreenTui() : undefined;
+  if (tui) tui.start();
   if (!prompt && interactive && rl)
     prompt = (await rl.question("What should Forge do? ")).trim();
   if (!prompt) {
@@ -257,6 +296,7 @@ async function runTask(args: ParsedArgs): Promise<number> {
       ? async (
           proposal: ToolProposalEvent,
         ): Promise<"approve-once" | "approve-session" | "deny" | "cancel"> => {
+          tui?.showApproval(proposal);
           const answer = (
             await rl.question(
               `Approve ${proposal.tool}? [y]es/[s]ession/[n]o/[c]ancel: `,
@@ -277,16 +317,20 @@ async function runTask(args: ParsedArgs): Promise<number> {
       workspace,
       policy: "safe" as const,
       json: isJson,
-      onEvent: (event: ForgeEvent) => renderEvent(event, isJson),
+      onEvent: (event: ForgeEvent) => {
+        if (tui) tui.handle(event);
+        else renderEvent(event, isJson);
+      },
       ...(approve ? { approve } : {}),
     };
     const result = await supervisor.run(runOptions);
-    if (rl) rl.close();
     return result.status === "completed" ? 0 : 1;
   } catch (error) {
-    if (rl) rl.close();
     console.error(error instanceof Error ? error.message : String(error));
     return 1;
+  } finally {
+    if (rl) rl.close();
+    if (tui) tui.stop();
   }
 }
 
@@ -303,6 +347,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (args.command === "doctor") return doctor();
   if (args.command === "config") return configCommand(args);
   if (args.command === "session") return sessionCommand(args);
+  if (args.command === "undo") return undoCommand(args);
   return runTask(args);
 }
 

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { lstatSync, promises as fs } from "node:fs";
 import path from "node:path";
 import type {
   RiskClass,
@@ -142,12 +142,23 @@ export class WorkspaceTools {
             output: await this.applyPatch(request.arguments),
             durationMs: Date.now() - started,
           };
-        case "process.run":
+        case "process.run": {
+          const output = await this.runProcess(request.arguments);
           return {
-            ok: true,
-            output: await this.runProcess(request.arguments),
+            ok: output.exitCode === 0,
+            output,
+            ...(output.exitCode === 0
+              ? {}
+              : {
+                  error: {
+                    code: "COMMAND_FAILED",
+                    message: `Command exited with code ${output.exitCode}`,
+                    retryable: true,
+                  },
+                }),
             durationMs: Date.now() - started,
           };
+        }
       }
     } catch (error) {
       return errorResult(
@@ -163,6 +174,15 @@ export class WorkspaceTools {
     if (!relativePath || path.isAbsolute(relativePath))
       throw new Error("Only relative workspace paths are allowed");
     const target = path.resolve(this.root, relativePath);
+    let current = this.root;
+    for (const part of relativePath.split(/[\\/]+/).filter(Boolean)) {
+      current = path.join(current, part);
+      const stat = lstatSync(current, { throwIfNoEntry: false });
+      if (stat?.isSymbolicLink())
+        throw new Error(
+          "Symbolic-link paths are denied by the workspace policy",
+        );
+    }
     const relative = path.relative(this.root, target);
     if (
       relative.startsWith(`..${path.sep}`) ||
@@ -199,6 +219,7 @@ export class WorkspaceTools {
         const absolute = path.join(directory, entry.name);
         const relative = path.relative(this.root, absolute);
         if (this.isSensitive(relative)) continue;
+        if (entry.isSymbolicLink()) continue;
         if (entry.isDirectory()) {
           await visit(absolute);
         } else if (entry.isFile()) {
@@ -268,37 +289,93 @@ export class WorkspaceTools {
   }
 
   private async applyPatch(args: Record<string, unknown>): Promise<{
-    path: string;
-    checkpoint: string | null;
-    beforeSha256: string | null;
-    afterSha256: string;
+    files: string[];
+    checkpoint: string;
   }> {
-    const relativePath = String(args.path ?? "");
-    const content = args.content;
-    if (typeof content !== "string")
-      throw new Error("workspace.apply_patch requires string content");
-    const target = this.resolveSafe(relativePath);
-    const previous = await fs.readFile(target).catch(() => Buffer.from(""));
-    let checkpoint: string | null = null;
-    if (previous.length) {
-      checkpoint = randomUUID();
-      await fs.mkdir(this.checkpointRoot, { recursive: true, mode: 0o700 });
-      await fs.writeFile(
-        path.join(this.checkpointRoot, `${checkpoint}.bak`),
-        previous,
-        { mode: 0o600 },
-      );
-    }
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(target, content, "utf8");
-    return {
-      path: relativePath,
-      checkpoint,
-      beforeSha256: previous.length
+    const rawFiles = Array.isArray(args.files)
+      ? args.files
+      : [
+          {
+            path: args.path,
+            content: args.content,
+            originalSha256: args.originalSha256,
+          },
+        ];
+    if (!rawFiles.length) throw new Error("At least one file is required");
+    const changes = rawFiles.map((raw) => {
+      if (!raw || typeof raw !== "object")
+        throw new Error("Each patch file must be an object");
+      const item = raw as Record<string, unknown>;
+      const relativePath = String(item.path ?? "");
+      const content = item.content;
+      if (typeof content !== "string")
+        throw new Error("Each patch file requires string content");
+      return {
+        relativePath,
+        target: this.resolveSafe(relativePath),
+        content,
+        originalSha256:
+          typeof item.originalSha256 === "string" ? item.originalSha256 : null,
+      };
+    });
+    const checkpoint = randomUUID();
+    const manifest: Array<{
+      path: string;
+      existed: boolean;
+      backup: string | null;
+    }> = [];
+    await fs.mkdir(this.checkpointRoot, { recursive: true, mode: 0o700 });
+    for (const [index, change] of changes.entries()) {
+      const previous = await fs.readFile(change.target).catch(() => null);
+      const beforeSha256 = previous
         ? createHash("sha256").update(previous).digest("hex")
-        : null,
-      afterSha256: createHash("sha256").update(content).digest("hex"),
+        : null;
+      if (change.originalSha256 && change.originalSha256 !== beforeSha256)
+        throw new Error(`Stale file detected: ${change.relativePath}`);
+      const backup = previous ? `${checkpoint}-${index}.bak` : null;
+      if (previous && backup)
+        await fs.writeFile(path.join(this.checkpointRoot, backup), previous, {
+          mode: 0o600,
+        });
+      manifest.push({
+        path: change.relativePath,
+        existed: Boolean(previous),
+        backup,
+      });
+    }
+    await fs.writeFile(
+      path.join(this.checkpointRoot, `${checkpoint}.json`),
+      JSON.stringify({ workspace: this.root, files: manifest }, null, 2),
+      { mode: 0o600 },
+    );
+    try {
+      for (const change of changes) {
+        await fs.mkdir(path.dirname(change.target), { recursive: true });
+        await fs.writeFile(change.target, change.content, "utf8");
+      }
+    } catch (error) {
+      await this.restoreCheckpoint(checkpoint).catch(() => undefined);
+      throw error;
+    }
+    return { files: changes.map((change) => change.relativePath), checkpoint };
+  }
+
+  public async restoreCheckpoint(checkpoint: string): Promise<void> {
+    if (!/^[0-9a-f-]{36}$/i.test(checkpoint))
+      throw new Error("Invalid checkpoint ID");
+    const manifestPath = path.join(this.checkpointRoot, `${checkpoint}.json`);
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8")) as {
+      workspace: string;
+      files: Array<{ path: string; existed: boolean; backup: string | null }>;
     };
+    if (manifest.workspace !== this.root)
+      throw new Error("Checkpoint belongs to a different workspace");
+    for (const file of manifest.files) {
+      const target = this.resolveSafe(file.path);
+      if (file.existed && file.backup)
+        await fs.copyFile(path.join(this.checkpointRoot, file.backup), target);
+      else await fs.unlink(target).catch(() => undefined);
+    }
   }
 
   private async runGit(

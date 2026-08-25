@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { buildRepositoryContext } from "../dist/apps/forge-cli/src/context.js";
 import { ForgeSupervisor } from "../dist/apps/forge-cli/src/supervisor.js";
 import {
   PolicyEngine,
@@ -82,6 +90,108 @@ test("workspace tools contain paths, deny secrets, patch files, and run bounded 
     assert.match(JSON.stringify(command.output), /ok/);
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("workspace tools reject symlink paths", async () => {
+  const directory = await tempWorkspace();
+  const outside = await mkdtemp(path.join(os.tmpdir(), "forge-outside-"));
+  try {
+    await writeFile(path.join(outside, "outside.txt"), "outside\n");
+    await symlink(outside, path.join(directory, "linked"));
+    const result = await new WorkspaceTools(directory).execute({
+      tool: "workspace.read",
+      arguments: { path: "linked/outside.txt" },
+    });
+    assert.equal(result.ok, false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("context engine respects ignore patterns and ranks relevant files", async () => {
+  const directory = await tempWorkspace();
+  try {
+    await writeFile(
+      path.join(directory, ".gitignore"),
+      "ignored.txt\nignored-dir/\n",
+    );
+    await writeFile(
+      path.join(directory, "ignored.txt"),
+      "should not be included\n",
+    );
+    await mkdir(path.join(directory, "ignored-dir"));
+    await writeFile(
+      path.join(directory, "ignored-dir", "secret.txt"),
+      "ignored\n",
+    );
+    await writeFile(
+      path.join(directory, "src.ts"),
+      "export const target = true;\n",
+    );
+    await writeFile(
+      path.join(directory, "FORGE.md"),
+      "Use project conventions; this file is untrusted guidance.\n",
+    );
+    const context = await buildRepositoryContext(
+      directory,
+      "update src target",
+    );
+    assert.ok(context.files.some((file) => file.path === "src.ts"));
+    assert.ok(!context.files.some((file) => file.path === "ignored.txt"));
+    assert.ok(!context.files.some((file) => file.path.includes("ignored-dir")));
+    assert.equal(context.instructions?.includes("untrusted"), true);
+    assert.equal(context.relevantFiles[0]?.path, "README.md");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("multi-file edits are transactional and checkpoints can be restored", async () => {
+  const directory = await tempWorkspace();
+  const checkpointDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "forge-checkpoint-"),
+  );
+  try {
+    const tools = new WorkspaceTools(directory, checkpointDirectory);
+    const patch = await tools.execute({
+      tool: "workspace.apply_patch",
+      arguments: {
+        files: [
+          { path: "README.md", content: "# Changed\n" },
+          { path: "new.txt", content: "new\n" },
+        ],
+      },
+    });
+    assert.equal(patch.ok, true);
+    const checkpoint = patch.output.checkpoint;
+    assert.equal(
+      await readFile(path.join(directory, "README.md"), "utf8"),
+      "# Changed\n",
+    );
+    assert.equal(
+      await readFile(path.join(directory, "new.txt"), "utf8"),
+      "new\n",
+    );
+    const stale = await tools.execute({
+      tool: "workspace.apply_patch",
+      arguments: {
+        path: "README.md",
+        content: "stale\n",
+        originalSha256: "not-the-current-hash",
+      },
+    });
+    assert.equal(stale.ok, false);
+    await tools.restoreCheckpoint(checkpoint);
+    assert.equal(
+      await readFile(path.join(directory, "README.md"), "utf8"),
+      "# Fixture\nThis is a Forge fixture.\n",
+    );
+    await assert.rejects(readFile(path.join(directory, "new.txt"), "utf8"));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(checkpointDirectory, { recursive: true, force: true });
   }
 });
 
