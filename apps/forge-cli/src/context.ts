@@ -5,6 +5,7 @@ export interface ContextFile {
   path: string;
   bytes: number;
   content?: string;
+  symbols?: string[];
 }
 
 export interface RepositoryContext {
@@ -14,6 +15,7 @@ export interface RepositoryContext {
   instructions: string | null;
   files: ContextFile[];
   relevantFiles: ContextFile[];
+  verificationCommands: string[][];
 }
 
 const ignored = new Set([
@@ -41,6 +43,20 @@ const priorityNames = [
 
 function isText(buffer: Buffer): boolean {
   return !buffer.includes(0);
+}
+
+function extractSymbols(content: string): string[] {
+  const symbols = new Set<string>();
+  const patterns = [
+    /(?:export\s+)?(?:async\s+)?(?:function|class|interface|type)\s+([A-Za-z_$][\w$]*)/g,
+    /(?:def|class)\s+([A-Za-z_][\w]*)/g,
+    /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of content.matchAll(pattern))
+      if (match[1]) symbols.add(match[1]);
+  }
+  return [...symbols].slice(0, 80);
 }
 
 function score(filePath: string, terms: string[]): number {
@@ -105,6 +121,36 @@ async function readInstructions(root: string): Promise<string | null> {
   return content ? content.slice(0, 12_000) : null;
 }
 
+async function detectVerificationCommands(
+  root: string,
+  files: ContextFile[],
+): Promise<string[][]> {
+  const commands: string[][] = [];
+  const packageJson = await fs
+    .readFile(path.join(root, "package.json"), "utf8")
+    .catch(() => null);
+  if (packageJson) {
+    try {
+      const parsed = JSON.parse(packageJson) as {
+        scripts?: Record<string, unknown>;
+      };
+      for (const name of ["test", "lint", "format", "build", "typecheck"]) {
+        if (typeof parsed.scripts?.[name] === "string")
+          commands.push(["npm", "run", name]);
+      }
+    } catch {
+      // Invalid project metadata is context data, not a reason to fail a Forge session.
+    }
+  }
+  if (
+    files.some(
+      (file) => file.path.startsWith("tests/") || file.path.startsWith("test/"),
+    )
+  )
+    commands.push(["python", "-m", "pytest"]);
+  return commands.slice(0, 8);
+}
+
 export async function buildRepositoryContext(
   root: string,
   prompt: string,
@@ -132,6 +178,7 @@ export async function buildRepositoryContext(
       content:
         content.slice(0, 24_000) +
         (content.length > 24_000 ? "\n...[truncated]" : ""),
+      symbols: extractSymbols(content),
     });
   }
   const has = (name: string) =>
@@ -163,5 +210,6 @@ export async function buildRepositoryContext(
     instructions: await readInstructions(root),
     files,
     relevantFiles,
+    verificationCommands: await detectVerificationCommands(root, files),
   };
 }

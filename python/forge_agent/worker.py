@@ -27,6 +27,9 @@ TOOL_RISKS = {
     "workspace.apply_patch": "reversible-write",
     "process.run": "local-execution",
     "git.status": "read-only",
+    "git.branch": "reversible-write",
+    "git.stage": "reversible-write",
+    "git.commit": "destructive",
 }
 
 TOOL_SCHEMAS = [
@@ -37,6 +40,9 @@ TOOL_SCHEMAS = [
     {"type": "function", "function": {"name": "workspace.apply_patch", "description": "Apply a complete replacement to one file after explicit user approval.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"], "additionalProperties": False}}},
     {"type": "function", "function": {"name": "process.run", "description": "Run a bounded local verification command after explicit user approval.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}, "timeoutMs": {"type": "integer", "minimum": 100, "maximum": 120000}}, "required": ["command"], "additionalProperties": False}}},
     {"type": "function", "function": {"name": "git.status", "description": "Inspect Git status without changing it.", "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}},
+    {"type": "function", "function": {"name": "git.branch", "description": "Create a local branch after approval.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"], "additionalProperties": False}}},
+    {"type": "function", "function": {"name": "git.stage", "description": "Stage selected workspace paths after approval.", "parameters": {"type": "object", "properties": {"paths": {"type": "array", "items": {"type": "string"}}}, "required": ["paths"], "additionalProperties": False}}},
+    {"type": "function", "function": {"name": "git.commit", "description": "Create a local commit after explicit approval.", "parameters": {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"], "additionalProperties": False}}},
 ]
 
 

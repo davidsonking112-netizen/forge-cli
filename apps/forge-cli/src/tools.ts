@@ -72,7 +72,43 @@ export const TOOL_METADATA: Record<ToolName, ToolMetadata> = {
     description: "Run an approved local process",
   },
   "git.status": { risk: "read-only", description: "Inspect Git status" },
+  "git.branch": {
+    risk: "reversible-write",
+    description: "Create a local Git branch",
+  },
+  "git.stage": {
+    risk: "reversible-write",
+    description: "Stage approved workspace paths",
+  },
+  "git.commit": {
+    risk: "destructive",
+    description: "Create a local Git commit",
+  },
 };
+
+function safeChildEnvironment(): NodeJS.ProcessEnv {
+  const allowed = [
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "LANG",
+    "CI",
+    "SystemRoot",
+    "ComSpec",
+    "PATHEXT",
+  ];
+  const environment: NodeJS.ProcessEnv = { CI: "1" };
+  for (const key of allowed)
+    if (process.env[key]) environment[key] = process.env[key];
+  for (const key of Object.keys(process.env))
+    if (key.startsWith("LC_")) environment[key] = process.env[key];
+  return environment;
+}
 
 function errorResult(
   code: string,
@@ -136,6 +172,74 @@ export class WorkspaceTools {
             output: await this.runGit(["status", "--short", "--branch"]),
             durationMs: Date.now() - started,
           };
+        case "git.branch": {
+          const name = String(request.arguments.name ?? "");
+          if (
+            !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}$/.test(name) ||
+            name.includes("..")
+          )
+            throw new Error("Invalid branch name");
+          const output = await this.runGit(["switch", "-c", name]);
+          return {
+            ok: output.exitCode === 0,
+            output,
+            ...(output.exitCode === 0
+              ? {}
+              : {
+                  error: {
+                    code: "GIT_BRANCH_FAILED",
+                    message: output.output,
+                    retryable: false,
+                  },
+                }),
+            durationMs: Date.now() - started,
+          };
+        }
+        case "git.stage": {
+          const paths = Array.isArray(request.arguments.paths)
+            ? request.arguments.paths.map(String)
+            : [];
+          if (!paths.length || paths.length > 100)
+            throw new Error("git.stage requires 1 to 100 relative paths");
+          for (const relativePath of paths) this.resolveSafe(relativePath);
+          const output = await this.runGit(["add", "--", ...paths]);
+          return {
+            ok: output.exitCode === 0,
+            output,
+            ...(output.exitCode === 0
+              ? {}
+              : {
+                  error: {
+                    code: "GIT_STAGE_FAILED",
+                    message: output.output,
+                    retryable: false,
+                  },
+                }),
+            durationMs: Date.now() - started,
+          };
+        }
+        case "git.commit": {
+          const message = String(request.arguments.message ?? "").trim();
+          if (!message || message.length > 200)
+            throw new Error(
+              "git.commit requires a commit message of 1-200 characters",
+            );
+          const output = await this.runGit(["commit", "-m", message]);
+          return {
+            ok: output.exitCode === 0,
+            output,
+            ...(output.exitCode === 0
+              ? {}
+              : {
+                  error: {
+                    code: "GIT_COMMIT_FAILED",
+                    message: output.output,
+                    retryable: false,
+                  },
+                }),
+            durationMs: Date.now() - started,
+          };
+        }
         case "workspace.apply_patch":
           return {
             ok: true,
@@ -408,7 +512,7 @@ export class WorkspaceTools {
       const child = spawn(command, commandArgs, {
         cwd: this.root,
         shell,
-        env: { ...process.env, CI: "1" },
+        env: safeChildEnvironment(),
         windowsHide: true,
       });
       let output = "";

@@ -6,7 +6,7 @@ The TypeScript/Node.js supervisor owns the command-line interface, terminal even
 
 ## Status
 
-Forge v0.2 is an active development release. It includes a deterministic mock provider for offline tests and an opt-in OpenAI-compatible provider boundary with streaming and normalized tool calls. The supervisor adds ranked repository context, transactional multi-file edits, checkpoint recovery, undo support, and a full-screen terminal workspace with a plain-terminal fallback.
+Forge v0.3 is an active development release. It adds provider request controls, lightweight symbol-aware context, precise recovery-safe editing, secure external-tool and ACP-ready boundaries, and approval-gated extension points while retaining the v0.2 local-first workflow.
 
 ## Development requirements
 
@@ -49,6 +49,8 @@ FORGE_PROVIDER=openai-compatible \
 FORGE_API_KEY=your-key \
 FORGE_BASE_URL=https://api.example.com/v1 \
 FORGE_MODEL=your-model \
+FORGE_MAX_TOKENS=8192 \
+FORGE_REASONING_EFFORT=medium \
 node dist/apps/forge-cli/src/main.js "inspect this repository"
 ```
 
@@ -56,7 +58,7 @@ See [docs/PROVIDERS.md](docs/PROVIDERS.md) for provider behavior and credential 
 
 ## Safety model
 
-Forge starts in read-only exploration mode. File writes and command execution are gated, bounded, and visible. Repository instruction files are treated as untrusted guidance and cannot override the local policy. Forge does not persist provider credentials, does not expose common secret files by default, and does not include unrestricted auto-approval in v0.2.
+Forge starts in read-only exploration mode. File writes and command execution are gated, bounded, and visible. Repository instruction files are treated as untrusted guidance and cannot override the local policy. Forge does not persist provider credentials, does not expose common secret files by default, and does not include unrestricted auto-approval in v0.3. External servers remain disabled unless a future explicit consent flow enables them.
 
 ## Repository layout
 

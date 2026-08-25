@@ -11,6 +11,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { buildRepositoryContext } from "../dist/apps/forge-cli/src/context.js";
+import {
+  AcpBridge,
+  ExternalToolRegistry,
+} from "../dist/apps/forge-cli/src/integrations.js";
 import { ForgeSupervisor } from "../dist/apps/forge-cli/src/supervisor.js";
 import {
   PolicyEngine,
@@ -88,9 +92,76 @@ test("workspace tools contain paths, deny secrets, patch files, and run bounded 
     });
     assert.equal(command.ok, true);
     assert.match(JSON.stringify(command.output), /ok/);
+    const environment = await tools.execute({
+      tool: "process.run",
+      arguments: {
+        command: process.execPath,
+        args: [
+          "-e",
+          "process.stdout.write(process.env.OPENAI_API_KEY ? 'present' : 'absent')",
+        ],
+        timeoutMs: 5000,
+      },
+    });
+    assert.equal(environment.ok, true);
+    assert.match(JSON.stringify(environment.output), /absent/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("Git workflow tools validate mutation inputs", async () => {
+  const directory = await tempWorkspace();
+  try {
+    const tools = new WorkspaceTools(directory);
+    const invalidBranch = await tools.execute({
+      tool: "git.branch",
+      arguments: { name: "../escape" },
+    });
+    assert.equal(invalidBranch.ok, false);
+    const emptyStage = await tools.execute({
+      tool: "git.stage",
+      arguments: { paths: [] },
+    });
+    assert.equal(emptyStage.ok, false);
+    const emptyCommit = await tools.execute({
+      tool: "git.commit",
+      arguments: { message: "" },
+    });
+    assert.equal(emptyCommit.ok, false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("external integrations require explicit enablement and normalize ACP events", () => {
+  const registry = new ExternalToolRegistry();
+  registry.register({
+    id: "local-helper",
+    command: "helper",
+    args: [],
+    enabled: true,
+    trust: "untrusted",
+    defaultRisk: "network",
+  });
+  assert.equal(registry.list()[0]?.enabled, false);
+  assert.throws(
+    () => registry.getEnabled("local-helper"),
+    /not explicitly enabled/,
+  );
+  registry.enable("local-helper");
+  assert.equal(registry.getEnabled("local-helper").id, "local-helper");
+  const normalized = new AcpBridge().normalize({
+    type: "prompt",
+    prompt: "  inspect files  ",
+    workspace: "  /tmp/project  ",
+  });
+  assert.equal(normalized.prompt, "inspect files");
+  assert.equal(normalized.workspace, "/tmp/project");
+  assert.throws(
+    () => new AcpBridge().normalize({ type: "prompt", prompt: "   " }),
+    /cannot be empty/,
+  );
 });
 
 test("workspace tools reject symlink paths", async () => {
@@ -143,6 +214,8 @@ test("context engine respects ignore patterns and ranks relevant files", async (
     assert.ok(!context.files.some((file) => file.path.includes("ignored-dir")));
     assert.equal(context.instructions?.includes("untrusted"), true);
     assert.equal(context.relevantFiles[0]?.path, "README.md");
+    const source = context.relevantFiles.find((file) => file.path === "src.ts");
+    assert.ok(source?.symbols?.includes("target"));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

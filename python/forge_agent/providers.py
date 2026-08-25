@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -62,13 +63,16 @@ def redact(text: str) -> str:
 
 
 class OpenAICompatibleProvider:
-    def __init__(self, *, api_key: str, base_url: str, model: str, timeout: float = 90.0) -> None:
+    def __init__(self, *, api_key: str, base_url: str, model: str, timeout: float = 90.0, max_tokens: int | None = None, reasoning_effort: str | None = None, max_retries: int = 2) -> None:
         if not api_key:
             raise ValueError("FORGE_API_KEY or OPENAI_API_KEY is required for the OpenAI-compatible provider")
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
+        self.max_retries = max(0, min(max_retries, 5))
 
     def complete(
         self,
@@ -83,6 +87,10 @@ class OpenAICompatibleProvider:
             "temperature": 0,
             "stream": bool(on_text),
         }
+        if self.max_tokens is not None:
+            body["max_tokens"] = self.max_tokens
+        if self.reasoning_effort:
+            body["reasoning_effort"] = self.reasoning_effort
         if tools:
             body["tools"] = tools
         request = urllib.request.Request(
@@ -94,17 +102,25 @@ class OpenAICompatibleProvider:
             },
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                if on_text:
-                    return self._read_stream(response, on_text)
-                payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = redact(exc.read().decode("utf-8", errors="replace")[:1000])
-            raise RuntimeError(f"Provider HTTP {exc.code}: {detail}") from exc
-        except (urllib.error.URLError, TimeoutError) as exc:
-            raise RuntimeError(f"Provider request failed: {exc}") from exc
-        return self._parse_payload(payload)
+        for attempt in range(self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    if on_text:
+                        return self._read_stream(response, on_text)
+                    payload = json.loads(response.read().decode("utf-8"))
+                return self._parse_payload(payload)
+            except urllib.error.HTTPError as exc:
+                detail = redact(exc.read().decode("utf-8", errors="replace")[:1000])
+                if exc.code in {408, 409, 429, 500, 502, 503, 504} and attempt < self.max_retries:
+                    time.sleep(min(2 ** attempt, 8))
+                    continue
+                raise RuntimeError(f"Provider HTTP {exc.code}: {detail}") from exc
+            except (urllib.error.URLError, TimeoutError) as exc:
+                if attempt < self.max_retries:
+                    time.sleep(min(2 ** attempt, 8))
+                    continue
+                raise RuntimeError(f"Provider request failed: {redact(str(exc))}") from exc
+        raise RuntimeError("Provider request exhausted its retry budget")
 
     def _read_stream(self, response: Any, on_text: Callable[[str], None]) -> ProviderReply:
         text_parts: list[str] = []
@@ -178,9 +194,13 @@ def build_provider() -> Provider:
     if provider_name in {"mock", "test"}:
         return MockProvider()
     if provider_name in {"openai", "openai-compatible", "compatible", "xai"}:
+        max_tokens = int(os.environ["FORGE_MAX_TOKENS"]) if os.environ.get("FORGE_MAX_TOKENS") else None
         return OpenAICompatibleProvider(
             api_key=os.environ.get("FORGE_API_KEY") or os.environ.get("OPENAI_API_KEY", ""),
             base_url=os.environ.get("FORGE_BASE_URL", "https://api.openai.com/v1"),
             model=os.environ.get("FORGE_MODEL", "gpt-4.1-mini"),
+            max_tokens=max_tokens,
+            reasoning_effort=os.environ.get("FORGE_REASONING_EFFORT"),
+            max_retries=int(os.environ.get("FORGE_PROVIDER_RETRIES", "2")),
         )
     raise ValueError(f"Unsupported FORGE_PROVIDER: {provider_name}")

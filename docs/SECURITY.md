@@ -16,7 +16,7 @@ Multi-file edits validate all paths and optional original content hashes before 
 
 ## Process execution
 
-Commands run with an explicit working directory, bounded timeout, bounded combined output, and captured exit status. Shell interpretation is an explicit request rather than an implicit default. The process result is returned to the agent as data and is never treated as proof that a task succeeded unless the exit status and output support that conclusion.
+Commands run with an explicit working directory, bounded timeout, bounded combined output, and captured exit status. Shell interpretation is an explicit request rather than an implicit default. Project commands receive a minimal environment allowlist rather than the full parent environment, so provider credentials and unrelated secret variables are not inherited. The process result is returned to the agent as data and is never treated as proof that a task succeeded unless the exit status and output support that conclusion.
 
 ## Provider and prompt-injection boundaries
 

@@ -17,7 +17,10 @@ export type ToolName =
   | "workspace.diff"
   | "workspace.apply_patch"
   | "process.run"
-  | "git.status";
+  | "git.status"
+  | "git.branch"
+  | "git.stage"
+  | "git.commit";
 
 export interface BaseEvent {
   protocol: typeof PROTOCOL_VERSION;

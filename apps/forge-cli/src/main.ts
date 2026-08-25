@@ -10,9 +10,10 @@ import type {
 } from "../../../packages/protocol/src/index.js";
 import { ForgeSupervisor } from "./supervisor.js";
 import { FullScreenTui } from "./tui.js";
+import { loadExternalServers } from "./integrations.js";
 import { WorkspaceTools } from "./tools.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 
 function usage(): string {
   return `Forge CLI v${VERSION}
@@ -25,6 +26,7 @@ Usage:
   forge config show|path|set <key> <v>   Inspect or update local configuration
   forge session list|resume|export|delete Manage local sessions
   forge undo <checkpoint-id>              Restore a Forge-managed checkpoint
+  forge git status|branch|stage|commit    Use approval-gated local Git workflows
 
 Options:
   --output text|json     Select rendering mode (default: text)
@@ -51,6 +53,8 @@ function parseArgs(argv: string[]): ParsedArgs {
     "config",
     "session",
     "undo",
+    "integrations",
+    "git",
     "help",
   ]);
   const command = first && knownCommands.has(first) ? first : "interactive";
@@ -246,6 +250,85 @@ async function sessionCommand(args: ParsedArgs): Promise<number> {
   return 2;
 }
 
+async function gitCommand(args: ParsedArgs): Promise<number> {
+  const action = args.positional[0] ?? "status";
+  const workspace = path.resolve(
+    flagString(args.flags, "workspace", process.cwd()),
+  );
+  const tools = new WorkspaceTools(workspace);
+  if (action === "status") {
+    const result = await tools.execute({ tool: "git.status", arguments: {} });
+    console.log(JSON.stringify(result.output ?? result.error, null, 2));
+    return result.ok ? 0 : 1;
+  }
+  let tool: "git.branch" | "git.stage" | "git.commit";
+  let arguments_: Record<string, unknown>;
+  if (action === "branch") {
+    tool = "git.branch";
+    arguments_ = { name: args.positional[1] };
+  } else if (action === "stage") {
+    tool = "git.stage";
+    arguments_ = { paths: args.positional.slice(1) };
+  } else if (action === "commit") {
+    tool = "git.commit";
+    arguments_ = { message: args.positional.slice(1).join(" ") };
+  } else {
+    console.error(
+      "Usage: forge git status|branch <name>|stage <paths...>|commit <message>",
+    );
+    return 2;
+  }
+  if (!input.isTTY) {
+    console.error(
+      "Git mutations require an interactive terminal approval; remote pushes are never performed by this command.",
+    );
+    return 2;
+  }
+  const rl = createInterface({ input, output });
+  try {
+    console.log(`Proposed Git action: ${tool} ${JSON.stringify(arguments_)}`);
+    const answer = (
+      await rl.question("Approve this local Git action? Type YES to continue: ")
+    ).trim();
+    if (answer !== "YES") {
+      console.log("Git action denied.");
+      return 1;
+    }
+    const result = await tools.execute({ tool, arguments: arguments_ });
+    console.log(JSON.stringify(result.output ?? result.error, null, 2));
+    return result.ok ? 0 : 1;
+  } finally {
+    rl.close();
+  }
+}
+
+async function integrationsCommand(args: ParsedArgs): Promise<number> {
+  const configPath = flagString(
+    args.flags,
+    "config",
+    path.join(
+      process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
+      "forge",
+      "integrations.json",
+    ),
+  );
+  const registry = await loadExternalServers(configPath);
+  const action = args.positional[0] ?? "list";
+  if (action !== "list") {
+    console.error(
+      "External servers are configured through integrations.json and remain disabled until a future explicit consent flow.",
+    );
+    return 2;
+  }
+  const servers = registry.list();
+  if (!servers.length) console.log("No external servers configured.");
+  for (const server of servers)
+    console.log(
+      `${server.id}  disabled  risk=${server.defaultRisk}  command=${server.command}`,
+    );
+  return 0;
+}
+
 async function undoCommand(args: ParsedArgs): Promise<number> {
   const checkpoint = args.positional[0];
   if (!checkpoint) {
@@ -348,6 +431,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (args.command === "config") return configCommand(args);
   if (args.command === "session") return sessionCommand(args);
   if (args.command === "undo") return undoCommand(args);
+  if (args.command === "integrations") return integrationsCommand(args);
+  if (args.command === "git") return gitCommand(args);
   return runTask(args);
 }
 
