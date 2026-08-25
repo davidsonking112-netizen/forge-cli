@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: forge-agent
+Version: 0.1.0
+Summary: Python agent worker for Forge CLI
+Author: Forge contributors
+License-Expression: MIT
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Dynamic: license-file
+
+# forge-agent
+
+The Python worker for Forge CLI. It runs under the TypeScript supervisor and communicates through the versioned JSONL protocol.

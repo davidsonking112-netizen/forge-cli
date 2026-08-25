@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forge-agent"
+version = "0.1.0"
+description = "Python agent worker for Forge CLI"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "Forge contributors"}]
+license = "MIT"
+license-files = ["../LICENSE"]
+dependencies = []
+
+[project.scripts]
+forge-agent = "forge_agent.worker:main"
+
+[tool.setuptools.packages.find]
+where = ["."]

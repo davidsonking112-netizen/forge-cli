@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge-cli.dev/protocol/v1/event.schema.json",
+  "title": "Forge protocol event",
+  "type": "object",
+  "required": ["protocol", "id", "sessionId", "type", "timestamp"],
+  "properties": {
+    "protocol": { "const": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "sessionId": { "type": "string", "minLength": 1 },
+    "type": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "agent.text" } } },
+      "then": {
+        "required": ["text"],
+        "properties": { "text": { "type": "string" } }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "agent.plan" } } },
+      "then": {
+        "required": ["goal", "steps", "assumptions", "verification"],
+        "properties": {
+          "goal": { "type": "string" },
+          "steps": { "type": "array" },
+          "assumptions": { "type": "array" },
+          "verification": { "type": "array" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "tool.proposal" } } },
+      "then": {
+        "required": ["tool", "risk", "arguments", "reason"],
+        "properties": {
+          "tool": { "type": "string" },
+          "risk": { "type": "string" },
+          "arguments": { "type": "object" },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "tool.result" } } },
+      "then": {
+        "required": ["tool", "ok", "approved", "durationMs"],
+        "properties": {
+          "tool": { "type": "string" },
+          "ok": { "type": "boolean" },
+          "approved": { "type": "boolean" },
+          "durationMs": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "session.complete" } } },
+      "then": {
+        "required": ["status", "summary", "changedFiles", "checks"],
+        "properties": {
+          "status": { "enum": ["completed", "failed", "cancelled"] },
+          "summary": { "type": "string" },
+          "changedFiles": { "type": "array", "items": { "type": "string" } },
+          "checks": { "type": "array" }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "forge-cli-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Forge CLI development workspace",
+  "type": "module",
+  "workspaces": [
+    "apps/forge-cli",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs && python3 -m unittest discover -s python/tests -p 'test_*.py'",
+    "format:check": "npx prettier --check .",
+    "forge": "node dist/apps/forge-cli/src/main.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.2"
+  }
+}
