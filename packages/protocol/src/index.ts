@@ -50,6 +50,15 @@ export interface AgentTextEvent extends BaseEvent {
   text: string;
 }
 
+export interface AgentDelegationEvent extends BaseEvent {
+  type: "agent.delegation";
+  role: "explorer" | "implementer" | "tester" | "reviewer";
+  status: "completed" | "failed" | "skipped";
+  turns: number;
+  text: string;
+  error?: string;
+}
+
 export interface AgentPlanEvent extends BaseEvent {
   type: "agent.plan";
   goal: string;
@@ -123,6 +132,7 @@ export type ForgeEvent =
   | SessionStartEvent
   | UserPromptEvent
   | AgentTextEvent
+  | AgentDelegationEvent
   | AgentPlanEvent
   | ToolProposalEvent
   | ToolResultEvent

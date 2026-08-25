@@ -1,6 +1,18 @@
 # Changelog
 
-## 0.3.0 — In development
+## 0.4.0 — 2026-08-26
+
+Forge v0.4 adds a bounded multi-agent analysis workflow with fixed explorer, implementer, tester, and reviewer roles. Delegated specialists are sequential, budget-limited, non-recursive, tool-less, and represented by typed `agent.delegation` events; workspace and process authority remains with the TypeScript supervisor.
+
+The release adds an MCP stdio JSON-RPC client and CLI workflows for listing configured servers, discovering tools, and calling a tool. MCP remains disabled by default: each command requires explicit `--enable`, tool calls require an interactive `YES` approval, child environments are minimized, requests are timed out, and response lines are size-limited. Remote transports and persistent enablement are intentionally deferred.
+
+The CLI now supports `forge inspect <session-id>`, `--no-record`, bounded orchestration flags, a v0.4 TUI title and delegation rendering, and `forge git prepare-pr`. The Git preparation command is read-only and produces a local title/body/diff draft without committing, pushing, opening a pull request, or contacting a remote service.
+
+Version metadata is synchronized across the root package, CLI package, Python package, worker metadata, and terminal UI. The release preserves workspace containment, symlink denial, sensitive-file protection, provider redaction, approval-gated writes and commands, minimal child environments, bounded output, transactional checkpoints, and deterministic offline tests.
+
+ACP remains an adapter boundary with normalized local events rather than a complete editor plugin or remote transport. Loadable extension and policy-pack marketplace behavior, unrestricted autonomy, cloud execution, background agents, remote pushes, and non-local telemetry remain outside this release.
+
+## 0.3.0 — 2026-08-26
 
 Forge v0.3 adds configurable provider token and reasoning controls, bounded retry backoff, lightweight symbol-aware repository context, verification-command discovery, secure MCP/ACP-ready boundaries, a typed extension registry, and approval-gated local Git status, branch, stage, and commit operations. External servers remain disabled by default and remote pushes are not performed.
 

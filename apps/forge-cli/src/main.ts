@@ -12,8 +12,9 @@ import { ForgeSupervisor } from "./supervisor.js";
 import { FullScreenTui } from "./tui.js";
 import { loadExternalServers } from "./integrations.js";
 import { WorkspaceTools } from "./tools.js";
+import { McpStdioClient } from "./mcp.js";
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 
 function usage(): string {
   return `Forge CLI v${VERSION}
@@ -22,17 +23,23 @@ Usage:
   forge [prompt]                         Start an interactive coding session
   forge plan <prompt>                    Explore and produce a read-only plan
   forge run --prompt <prompt>            Run a task with machine-readable output support
-  forge doctor                           Check local runtime and worker readiness
+  forge doctor [--repair]                Check runtime; print safe repair guidance
   forge config show|path|set <key> <v>   Inspect or update local configuration
   forge session list|resume|export|delete Manage local sessions
   forge undo <checkpoint-id>              Restore a Forge-managed checkpoint
   forge git status|branch|stage|commit    Use approval-gated local Git workflows
+  forge git prepare-pr [title]            Prepare a local review-ready PR draft
+  forge mcp list|tools|call               Use explicitly enabled MCP stdio servers
 
 Options:
   --output text|json     Select rendering mode (default: text)
   --workspace <path>     Set the approved workspace root
   --policy safe           Use the default approval policy (default)
   --simple               Disable the full-screen terminal workspace
+  --multi-agent          Enable bounded explorer/implementer/tester/reviewer delegation
+  --max-agents <n>       Limit delegated specialist roles (default: 4)
+  --max-total-turns <n>  Limit total delegated provider turns (default: 8)
+  --no-record            Do not persist this session locally
   --help                 Show this help
   --version              Show the version
 `;
@@ -52,8 +59,10 @@ function parseArgs(argv: string[]): ParsedArgs {
     "doctor",
     "config",
     "session",
+    "inspect",
     "undo",
     "integrations",
+    "mcp",
     "git",
     "help",
   ]);
@@ -87,6 +96,21 @@ function flagString(
 ): string {
   const value = flags[key];
   return typeof value === "string" ? value : fallback;
+}
+
+function boundedFlagInt(
+  flags: Record<string, string | boolean>,
+  key: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const raw = flags[key];
+  if (typeof raw !== "string" || !/^\\d+$/.test(raw)) return fallback;
+  const value = Number(raw);
+  return Number.isSafeInteger(value)
+    ? Math.max(minimum, Math.min(maximum, value))
+    : fallback;
 }
 
 function renderEvent(event: ForgeEvent, json: boolean): void {
@@ -136,9 +160,18 @@ function renderEvent(event: ForgeEvent, json: boolean): void {
   }
 }
 
-async function doctor(): Promise<number> {
+async function doctor(args?: ParsedArgs): Promise<number> {
   console.log(`Forge CLI ${VERSION}`);
   console.log(`Platform: ${os.platform()} ${os.arch()}`);
+  if (args?.flags.repair === true) {
+    console.log(
+      "Repair mode is guidance-only; Forge will not install packages or modify the workspace.",
+    );
+    console.log(
+      "Recommended checks: npm ci; python3 -m pip install --user .; npm run typecheck; npm test",
+    );
+    console.log("Set FORGE_PYTHON if python3 is not the intended interpreter.");
+  }
   console.log(`Node.js: ${process.version}`);
   try {
     const python =
@@ -250,6 +283,38 @@ async function sessionCommand(args: ParsedArgs): Promise<number> {
   return 2;
 }
 
+async function inspectCommand(args: ParsedArgs): Promise<number> {
+  const sessionId = args.positional[0];
+  if (!sessionId) {
+    console.error("Usage: forge inspect <session-id>");
+    return 2;
+  }
+  try {
+    const session = await new ForgeSupervisor().readSession(sessionId);
+    const counts: Record<string, number> = {};
+    for (const event of session.events)
+      counts[event.type] = (counts[event.type] ?? 0) + 1;
+    console.log(
+      JSON.stringify(
+        {
+          id: session.id,
+          workspace: session.workspace,
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt,
+          eventCount: session.events.length,
+          eventTypes: counts,
+        },
+        null,
+        2,
+      ),
+    );
+    return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
 async function gitCommand(args: ParsedArgs): Promise<number> {
   const action = args.positional[0] ?? "status";
   const workspace = path.resolve(
@@ -260,6 +325,40 @@ async function gitCommand(args: ParsedArgs): Promise<number> {
     const result = await tools.execute({ tool: "git.status", arguments: {} });
     console.log(JSON.stringify(result.output ?? result.error, null, 2));
     return result.ok ? 0 : 1;
+  }
+  if (action === "prepare-pr") {
+    const result = await tools.execute({
+      tool: "workspace.diff",
+      arguments: {},
+    });
+    if (!result.ok) {
+      console.error(JSON.stringify(result.error, null, 2));
+      return 1;
+    }
+    const title =
+      args.positional.slice(1).join(" ").trim() || "Forge changes for review";
+    const diff =
+      typeof result.output === "object" && result.output !== null
+        ? String((result.output as { output?: unknown }).output ?? "")
+        : "";
+    const body = [
+      "## Summary",
+      "",
+      "Prepared locally by Forge for review.",
+      "",
+      "## Verification",
+      "",
+      "- Review the generated diff before committing.",
+      "- Run the project checks before submission.",
+      "",
+      "## Diff",
+      "",
+      "```diff",
+      diff.slice(0, 80_000),
+      "```",
+    ].join("\\n");
+    console.log(JSON.stringify({ title, body, remoteAction: "none" }, null, 2));
+    return 0;
   }
   let tool: "git.branch" | "git.stage" | "git.commit";
   let arguments_: Record<string, unknown>;
@@ -299,6 +398,96 @@ async function gitCommand(args: ParsedArgs): Promise<number> {
     return result.ok ? 0 : 1;
   } finally {
     rl.close();
+  }
+}
+
+async function mcpCommand(args: ParsedArgs): Promise<number> {
+  const configPath = flagString(
+    args.flags,
+    "config",
+    path.join(
+      process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
+      "forge",
+      "integrations.json",
+    ),
+  );
+  const registry = await loadExternalServers(configPath);
+  const action = args.positional[0] ?? "list";
+  if (action === "list") {
+    console.log(JSON.stringify(registry.list(), null, 2));
+    return 0;
+  }
+  const id = args.positional[1];
+  if (!id) {
+    console.error(
+      "Usage: forge mcp list|tools <server-id>|call <server-id> <tool> [json]",
+    );
+    return 2;
+  }
+  if (args.flags.enable !== true) {
+    console.error(
+      "MCP use is disabled by default; add --enable to explicitly enable this server for one command.",
+    );
+    return 2;
+  }
+  try {
+    registry.enable(id);
+    const client = new McpStdioClient(registry.getEnabled(id));
+    await client.start();
+    try {
+      if (action === "tools") {
+        console.log(JSON.stringify(await client.listTools(), null, 2));
+        return 0;
+      }
+      if (action !== "call") {
+        console.error(
+          "Usage: forge mcp list|tools <server-id>|call <server-id> <tool> [json]",
+        );
+        return 2;
+      }
+      const tool = args.positional[2];
+      if (!tool) {
+        console.error("Usage: forge mcp call <server-id> <tool> [json]");
+        return 2;
+      }
+      let arguments_: Record<string, unknown> = {};
+      const rawArguments = args.positional[3];
+      if (rawArguments) {
+        const parsed = JSON.parse(rawArguments) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+          throw new Error("MCP arguments must be a JSON object");
+        arguments_ = parsed as Record<string, unknown>;
+      }
+      if (!input.isTTY) {
+        console.error(
+          "MCP tool calls require an interactive terminal approval; use tools discovery for non-mutating inspection.",
+        );
+        return 2;
+      }
+      const rl = createInterface({ input, output });
+      try {
+        const answer = (
+          await rl.question(
+            `Approve MCP call ${id}/${tool}? Type YES to continue: `,
+          )
+        ).trim();
+        if (answer !== "YES") {
+          console.log("MCP call denied.");
+          return 1;
+        }
+      } finally {
+        rl.close();
+      }
+      console.log(
+        JSON.stringify(await client.callTool(tool, arguments_), null, 2),
+      );
+      return 0;
+    } finally {
+      client.close();
+    }
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
   }
 }
 
@@ -405,6 +594,20 @@ async function runTask(args: ParsedArgs): Promise<number> {
         else renderEvent(event, isJson);
       },
       ...(approve ? { approve } : {}),
+      ...(args.flags["multi-agent"] === true
+        ? {
+            multiAgent: true,
+            maxAgents: boundedFlagInt(args.flags, "max-agents", 4, 1, 4),
+            maxTotalTurns: boundedFlagInt(
+              args.flags,
+              "max-total-turns",
+              8,
+              1,
+              16,
+            ),
+          }
+        : {}),
+      ...(args.flags["no-record"] === true ? { record: false } : {}),
     };
     const result = await supervisor.run(runOptions);
     return result.status === "completed" ? 0 : 1;
@@ -427,11 +630,13 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     console.log(VERSION);
     return 0;
   }
-  if (args.command === "doctor") return doctor();
+  if (args.command === "doctor") return doctor(args);
   if (args.command === "config") return configCommand(args);
   if (args.command === "session") return sessionCommand(args);
+  if (args.command === "inspect") return inspectCommand(args);
   if (args.command === "undo") return undoCommand(args);
   if (args.command === "integrations") return integrationsCommand(args);
+  if (args.command === "mcp") return mcpCommand(args);
   if (args.command === "git") return gitCommand(args);
   return runTask(args);
 }

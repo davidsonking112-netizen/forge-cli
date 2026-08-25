@@ -21,6 +21,10 @@ export interface RunOptions {
   policy?: PolicyMode;
   json?: boolean;
   approveAll?: boolean;
+  multiAgent?: boolean;
+  maxAgents?: number;
+  maxTotalTurns?: number;
+  record?: boolean;
   onEvent?: (event: ForgeEvent) => void;
   approve?: (
     proposal: ToolProposalEvent,
@@ -43,10 +47,20 @@ export class ForgeSupervisor {
 
   public async run(options: RunOptions): Promise<RunResult> {
     const workspace = path.resolve(options.workspace);
-    const session = await this.sessions.create(workspace);
+    const timestamp = new Date().toISOString();
+    const session: SessionRecord =
+      options.record === false
+        ? {
+            id: randomUUID(),
+            workspace,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            events: [],
+          }
+        : await this.sessions.create(workspace);
     const policy = new PolicyEngine(options.policy ?? "safe");
     const tools = new WorkspaceTools(workspace);
-    const worker = this.startWorker();
+    const worker = this.startWorker(options);
     const repositoryContext = await buildRepositoryContext(
       workspace,
       options.prompt,
@@ -59,7 +73,7 @@ export class ForgeSupervisor {
     };
 
     const emit = async (event: ForgeEvent): Promise<void> => {
-      await this.sessions.append(session, event);
+      if (options.record !== false) await this.sessions.append(session, event);
       options.onEvent?.(event);
     };
 
@@ -199,7 +213,7 @@ export class ForgeSupervisor {
     return this.sessions.getPath();
   }
 
-  private startWorker(): ChildProcessWithoutNullStreams {
+  private startWorker(options: RunOptions): ChildProcessWithoutNullStreams {
     const python =
       process.env.FORGE_PYTHON ??
       (process.platform === "win32" ? "python" : "python3");
@@ -209,6 +223,15 @@ export class ForgeSupervisor {
       PYTHONPATH: [pythonRoot, process.env.PYTHONPATH]
         .filter(Boolean)
         .join(path.delimiter),
+      ...(options.multiAgent === undefined
+        ? {}
+        : { FORGE_MULTI_AGENT: options.multiAgent ? "1" : "0" }),
+      ...(options.maxAgents === undefined
+        ? {}
+        : { FORGE_MAX_AGENTS: String(options.maxAgents) }),
+      ...(options.maxTotalTurns === undefined
+        ? {}
+        : { FORGE_MAX_TOTAL_TURNS: String(options.maxTotalTurns) }),
     };
     return spawn(python, ["-m", "forge_agent.worker"], {
       cwd: process.cwd(),

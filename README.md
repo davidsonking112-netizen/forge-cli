@@ -6,7 +6,7 @@ The TypeScript/Node.js supervisor owns the command-line interface, terminal even
 
 ## Status
 
-Forge v0.3 is an active development release. It adds provider request controls, lightweight symbol-aware context, precise recovery-safe editing, secure external-tool and ACP-ready boundaries, and approval-gated extension points while retaining the v0.2 local-first workflow.
+Forge v0.4 is an active development release. It adds bounded multi-agent analysis, an MCP stdio client, ACP-ready event normalization, local PR-draft preparation, session inspection, privacy mode, verification-command discovery, and stronger provider controls while retaining the local-first safety model.
 
 ## Development requirements
 
@@ -56,9 +56,21 @@ node dist/apps/forge-cli/src/main.js "inspect this repository"
 
 See [docs/PROVIDERS.md](docs/PROVIDERS.md) for provider behavior and credential handling.
 
+Enable bounded specialist analysis with explicit budgets:
+
+```bash
+FORGE_PROVIDER=openai-compatible \
+FORGE_API_KEY=your-key \
+node dist/apps/forge-cli/src/main.js run --multi-agent --max-agents 4 --max-total-turns 8 --prompt "review this repository"
+```
+
+Use `forge inspect <session-id>` to view local event metrics, `--no-record` for privacy-sensitive runs, and `forge git prepare-pr` to generate a local review draft without pushing remotely. `forge doctor --repair` prints setup guidance only; it never installs packages or edits the workspace.
+
+MCP is opt-in per command. Configure servers in `~/.config/forge/integrations.json`, inspect them with `forge mcp list`, and use `forge mcp tools <id> --enable` for discovery. Calls use `forge mcp call <id> <tool> '{}' --enable` and require an interactive `YES` confirmation.
+
 ## Safety model
 
-Forge starts in read-only exploration mode. File writes and command execution are gated, bounded, and visible. Repository instruction files are treated as untrusted guidance and cannot override the local policy. Forge does not persist provider credentials, does not expose common secret files by default, and does not include unrestricted auto-approval in v0.3. External servers remain disabled unless a future explicit consent flow enables them.
+Forge starts in read-only exploration mode. File writes and command execution are gated, bounded, and visible. Repository instruction files are treated as untrusted guidance and cannot override the local policy. Forge does not persist provider credentials, does not expose common secret files by default, and does not include unrestricted auto-approval in v0.4. External servers remain disabled unless explicitly enabled, and remote pushes are never performed by Forge.
 
 ## Repository layout
 

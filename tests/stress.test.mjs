@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   mkdtemp,
   mkdir,
@@ -15,7 +16,9 @@ import {
   ExternalToolRegistry,
   loadExternalServers,
 } from "../dist/apps/forge-cli/src/integrations.js";
+import { McpStdioClient } from "../dist/apps/forge-cli/src/mcp.js";
 import { SessionStore } from "../dist/apps/forge-cli/src/sessions.js";
+import { ForgeSupervisor } from "../dist/apps/forge-cli/src/supervisor.js";
 import { createEnvelope } from "../dist/packages/protocol/src/index.js";
 import { WorkspaceTools } from "../dist/apps/forge-cli/src/tools.js";
 
@@ -135,6 +138,99 @@ test("session persistence retains bounded events and rejects invalid IDs", async
     assert.equal((await store.list()).length, 0);
   } finally {
     await rm(state, { recursive: true, force: true });
+  }
+});
+
+test("MCP stdio client initializes, discovers tools, calls safely, and closes", async () => {
+  const serverScript =
+    "process.stdin.setEncoding('utf8'); let buffer=''; process.stdin.on('data', chunk => { buffer += chunk; for (const line of buffer.split('\\n').slice(0, -1)) { const request = JSON.parse(line); if (request.id && request.method === 'initialize') process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,result:{protocolVersion:'2025-06-18',capabilities:{}}})+'\\n'); if (request.id && request.method === 'tools/list') process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,result:{tools:[{name:'local.echo',inputSchema:{type:'object'}}]}})+'\\n'); if (request.id && request.method === 'tools/call') process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,result:{content:[{type:'text',text:String(request.params.arguments.value)}]}})+'\\n'); } buffer = buffer.slice(buffer.lastIndexOf('\\n') + 1); });";
+  const client = new McpStdioClient(
+    {
+      id: "fixture",
+      command: process.execPath,
+      args: ["-e", serverScript],
+      enabled: true,
+      trust: "untrusted",
+      defaultRisk: "network",
+    },
+    3000,
+  );
+  try {
+    await client.start();
+    assert.deepEqual((await client.listTools())[0]?.name, "local.echo");
+    const result = await client.callTool("local.echo", { value: "ok" });
+    assert.equal(result.content[0].text, "ok");
+  } finally {
+    client.close();
+  }
+});
+
+test("no-record supervisor runs do not persist session data", async () => {
+  const root = await fixture();
+  const state = await mkdtemp(path.join(os.tmpdir(), "forge-no-record-state-"));
+  try {
+    const events = [];
+    const supervisor = new ForgeSupervisor(new SessionStore(state));
+    const result = await supervisor.run({
+      prompt: "explain this repository",
+      workspace: root,
+      record: false,
+      onEvent: (event) => events.push(event),
+    });
+    assert.equal(result.status, "completed");
+    assert.ok(events.some((event) => event.type === "session.complete"));
+    assert.equal((await new SessionStore(state).list()).length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(state, { recursive: true, force: true });
+  }
+});
+
+test("v0.4 CLI exposes safe MCP and PR-preparation workflows", async () => {
+  const root = await fixture();
+  try {
+    const config = path.join(root, "integrations.json");
+    await writeFile(
+      config,
+      JSON.stringify({
+        servers: [{ id: "helper", command: process.execPath, args: [] }],
+      }),
+    );
+    const cli = path.resolve("dist/apps/forge-cli/src/main.js");
+    const listed = spawnSync(
+      process.execPath,
+      [cli, "mcp", "list", "--config", config],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      },
+    );
+    assert.equal(listed.status, 0);
+    assert.match(listed.stdout, /\"id\": \"helper\"/);
+    assert.match(listed.stdout, /\"enabled\": false/);
+    const denied = spawnSync(
+      process.execPath,
+      [cli, "mcp", "call", "helper", "local.echo", "{}", "--config", config],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      },
+    );
+    assert.equal(denied.status, 2);
+    assert.match(denied.stderr, /disabled by default/i);
+    const draft = spawnSync(
+      process.execPath,
+      [cli, "git", "prepare-pr", "stress review", "--workspace", root],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      },
+    );
+    assert.equal(draft.status, 0);
+    assert.match(draft.stdout, /\"title\": \"stress review\"/);
+    assert.match(draft.stdout, /\"remoteAction\": \"none\"/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

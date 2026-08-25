@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import pathlib
 import sys
 import unittest
@@ -7,7 +8,8 @@ from contextlib import redirect_stdout
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from forge_agent.providers import MockProvider, OpenAICompatibleProvider, redact
+from forge_agent.orchestration import BoundedOrchestrator
+from forge_agent.providers import MockProvider, OpenAICompatibleProvider, ProviderReply, redact
 from forge_agent.worker import main
 
 
@@ -58,6 +60,32 @@ class WorkerTests(unittest.TestCase):
         events = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertTrue(any(event["type"] == "agent.plan" for event in events))
         self.assertTrue(any(event["type"] == "session.complete" and event["status"] == "completed" for event in events))
+
+    def test_orchestrator_is_bounded_and_sequential(self):
+        class FakeProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, *, messages, tools, on_text=None):
+                self.calls += 1
+                return ProviderReply(text=f"role response {self.calls}")
+
+        provider = FakeProvider()
+        report = BoundedOrchestrator(max_agents=2, max_total_turns=2).run(provider=provider, goal="review code", context="bounded context")
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual([result.role for result in report.results], ["explorer", "implementer"])
+        self.assertIn("role response 1", report.merged_summary)
+
+    def test_worker_opt_in_multi_agent_flow_emits_delegations(self):
+        output = io.StringIO()
+        environment = {"FORGE_PROVIDER": "openai-compatible", "FORGE_MULTI_AGENT": "1", "FORGE_MAX_AGENTS": "2", "FORGE_MAX_TOTAL_TURNS": "2"}
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch("forge_agent.worker.build_provider", return_value=MockProvider()), mock.patch("sys.stdin", io.StringIO(json.dumps({"type": "session.start", "sessionId": "multi", "workspace": ".", "prompt": "review code", "context": {}}) + "\n")), redirect_stdout(output):
+            self.assertEqual(main(), 0)
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        delegations = [event for event in events if event["type"] == "agent.delegation"]
+        self.assertEqual(len(delegations), 2)
+        self.assertTrue(all(event["status"] == "completed" for event in delegations))
+        self.assertTrue(any(event["type"] == "session.complete" for event in events))
 
     def test_provider_errors_are_redacted(self):
         message = redact('api_key=sk-1234567890 secret=visible token=abc123')
