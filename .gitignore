@@ -13,3 +13,5 @@ htmlcov/
 !.env.example
 forge-sessions/
 *.log
+python/build/
+python/*.egg-info/
