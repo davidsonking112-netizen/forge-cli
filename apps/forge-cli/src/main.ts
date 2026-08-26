@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -141,7 +141,15 @@ function parseArgs(argv: string[]): ParsedArgs {
     const token = args[index];
     if (!token) continue;
     if (token.startsWith("--")) {
-      const key = token.slice(2);
+      const raw = token.slice(2);
+      const equals = raw.indexOf("=");
+      if (equals >= 0) {
+        const key = raw.slice(0, equals);
+        const value = raw.slice(equals + 1);
+        if (key) flags[key] = value;
+        continue;
+      }
+      const key = raw;
       const next = args[index + 1];
       if (next && !next.startsWith("--")) {
         flags[key] = next;
@@ -175,12 +183,26 @@ function selectedDiffPaths(
       raw
         .split(",")
         .map((item) => item.trim())
-        .filter(Boolean),
+        .filter(Boolean)
+        .map((item) => item.replaceAll("\\\\", "/")),
     ),
   ];
-  if (!paths.length || paths.length > 100)
+  if (
+    !paths.length ||
+    paths.length > 100 ||
+    paths.some(
+      (item) =>
+        item.length > 1_024 ||
+        path.posix.isAbsolute(item) ||
+        item.includes("\0") ||
+        path.posix
+          .normalize(item)
+          .split("/")
+          .some((part) => part === ".."),
+    )
+  )
     throw new Error("--only requires 1 to 100 comma-separated relative paths");
-  return paths;
+  return paths.map((item) => path.posix.normalize(item));
 }
 
 export function boundedFlagInt(
@@ -340,6 +362,39 @@ async function doctor(args?: ParsedArgs): Promise<number> {
   return result.status === "completed" ? 0 : 1;
 }
 
+async function readRestrictedFile(target: string): Promise<string | null> {
+  const stat = await fs.lstat(target).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  });
+  if (!stat) return null;
+  if (!stat.isFile() || stat.isSymbolicLink())
+    throw new Error(
+      `Refusing to read non-regular configuration file: ${target}`,
+    );
+  return fs.readFile(target, "utf8");
+}
+
+async function writeRestrictedFile(
+  target: string,
+  content: string,
+): Promise<void> {
+  const directory = path.dirname(target);
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  const temporary = `${target}.${randomUUID()}.tmp`;
+  await fs.writeFile(temporary, content, {
+    encoding: "utf8",
+    mode: 0o600,
+    flag: "wx",
+  });
+  try {
+    await fs.rename(temporary, target);
+  } catch (error) {
+    await fs.unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+}
+
 function systemPromptPath(): string {
   return path.join(
     process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
@@ -349,9 +404,7 @@ function systemPromptPath(): string {
 }
 
 async function loadSystemPrompt(): Promise<string | undefined> {
-  const content = await fs
-    .readFile(systemPromptPath(), "utf8")
-    .catch(() => null);
+  const content = await readRestrictedFile(systemPromptPath());
   return content ? content.slice(0, 20_000) : undefined;
 }
 
@@ -359,7 +412,7 @@ async function promptCommand(args: ParsedArgs): Promise<number> {
   const action = args.positional[0] ?? "show";
   const promptPath = systemPromptPath();
   if (action === "show") {
-    const content = await fs.readFile(promptPath, "utf8").catch(() => null);
+    const content = await readRestrictedFile(promptPath);
     if (content === null) {
       console.log("No user system prompt configured.");
       return 0;
@@ -386,11 +439,7 @@ async function promptCommand(args: ParsedArgs): Promise<number> {
       );
       return 2;
     }
-    await fs.mkdir(path.dirname(promptPath), { recursive: true, mode: 0o700 });
-    const existing = await fs.lstat(promptPath).catch(() => null);
-    if (existing?.isSymbolicLink())
-      throw new Error("System prompt path cannot be a symbolic link");
-    await fs.writeFile(promptPath, content, { encoding: "utf8", mode: 0o600 });
+    await writeRestrictedFile(promptPath, content);
     console.log(`User system prompt saved to ${promptPath}`);
     return 0;
   }
@@ -409,11 +458,12 @@ async function configCommand(args: ParsedArgs): Promise<number> {
     return 0;
   }
   if (args.positional[0] === "show" || !args.positional[0]) {
-    const content = await fs.readFile(configPath, "utf8").catch(() => "{}");
+    const content = (await readRestrictedFile(configPath)) ?? "{}";
     const parsed = JSON.parse(content) as Record<string, unknown>;
     for (const key of Object.keys(parsed)) {
+      const value = redactValue(parsed[key]);
       console.log(
-        `${key}=${key.toLowerCase().includes("key") || key.toLowerCase().includes("token") ? "[REDACTED]" : String(parsed[key])}`,
+        `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`,
       );
     }
     return 0;
@@ -425,13 +475,10 @@ async function configCommand(args: ParsedArgs): Promise<number> {
       console.error("Usage: forge config set <key> <value>");
       return 2;
     }
-    await fs.mkdir(path.dirname(configPath), { recursive: true, mode: 0o700 });
-    const content = await fs.readFile(configPath, "utf8").catch(() => "{}");
+    const content = (await readRestrictedFile(configPath)) ?? "{}";
     const parsed = JSON.parse(content) as Record<string, unknown>;
     parsed[key] = value;
-    await fs.writeFile(configPath, JSON.stringify(parsed, null, 2), {
-      mode: 0o600,
-    });
+    await writeRestrictedFile(configPath, JSON.stringify(parsed, null, 2));
     console.log(`Updated ${key}`);
     return 0;
   }
@@ -1592,7 +1639,7 @@ async function mcpCommand(args: ParsedArgs): Promise<number> {
       );
       return 2;
     }
-    const content = await fs.readFile(configPath, "utf8").catch(() => "{}");
+    const content = (await readRestrictedFile(configPath)) ?? "{}";
     const parsed = JSON.parse(content) as { servers?: unknown };
     if (!Array.isArray(parsed.servers)) {
       console.error("No MCP servers are configured.");
@@ -1626,11 +1673,7 @@ async function mcpCommand(args: ParsedArgs): Promise<number> {
     }
     server.enabled = action === "enable";
     server.explicitConsent = action === "enable";
-    await fs.mkdir(path.dirname(configPath), { recursive: true, mode: 0o700 });
-    await fs.writeFile(configPath, JSON.stringify(parsed, null, 2), {
-      encoding: "utf8",
-      mode: 0o600,
-    });
+    await writeRestrictedFile(configPath, JSON.stringify(parsed, null, 2));
     console.log(`MCP server ${id} ${action}d in local configuration.`);
     return 0;
   }

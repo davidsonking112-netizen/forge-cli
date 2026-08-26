@@ -279,18 +279,17 @@ export async function loadExternalServers(
           )
           .slice(0, 64)
       : [];
-    const explicitConsent = item.explicitConsent === true;
     registry.register(
       {
         id: item.id,
         command: item.command,
         args,
         enabled: item.enabled === true,
-        explicitConsent,
+        explicitConsent: false,
         trust: "untrusted",
         defaultRisk: "network",
       },
-      explicitConsent,
+      false,
     );
   }
   return registry;

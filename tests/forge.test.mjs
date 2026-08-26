@@ -563,6 +563,16 @@ test("workspace tools contain paths, deny secrets, patch files, and run bounded 
     });
     assert.equal(environment.ok, true);
     assert.match(JSON.stringify(environment.output), /absent/);
+    const shellDenied = await tools.execute({
+      tool: "process.run",
+      arguments: {
+        command: process.execPath,
+        args: ["-e", "process.stdout.write('unexpected')"],
+        shell: true,
+      },
+    });
+    assert.equal(shellDenied.ok, false);
+    assert.match(shellDenied.error?.message ?? "", /allowShell=true/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -672,6 +682,22 @@ test("session records reject traversal and redact process argument secrets", asy
     const saved = JSON.stringify(await store.read(record.id));
     assert.doesNotMatch(saved, /sk-secret-token|abc123/);
     assert.match(saved, /REDACTED/);
+    await store.append(record, {
+      ...createEnvelope("agent.text", record.id),
+      type: "agent.text",
+      text: "secret=should-be-redacted",
+    });
+    for (let index = 0; index < 510; index += 1) {
+      await store.append(record, {
+        ...createEnvelope("agent.text", record.id),
+        type: "agent.text",
+        text: `event-${index}`,
+      });
+    }
+    assert.equal(record.events.length, 500);
+    const capped = JSON.stringify(await store.read(record.id));
+    assert.doesNotMatch(capped, /should-be-redacted/);
+    assert.match(capped, /event-509/);
     await assert.rejects(store.remove("../../outside"), /Invalid session ID/);
   } finally {
     await rm(state, { recursive: true, force: true });

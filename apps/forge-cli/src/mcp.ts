@@ -110,23 +110,33 @@ export class McpStdioClient {
     const response = await this.request("tools/list", {}, signal);
     const tools = (response.result as { tools?: unknown } | undefined)?.tools;
     if (!Array.isArray(tools)) return [];
+    if (tools.length > 500)
+      throw new Error("MCP tool list exceeds the 500-tool limit");
     return tools.flatMap((value) => {
       if (!value || typeof value !== "object") return [];
       const tool = value as Record<string, unknown>;
-      return typeof tool.name === "string"
-        ? [
-            {
-              name: tool.name,
-              ...(typeof tool.description === "string"
-                ? { description: tool.description }
-                : {}),
-              inputSchema:
-                typeof tool.inputSchema === "object" && tool.inputSchema
-                  ? (tool.inputSchema as Record<string, unknown>)
-                  : { type: "object" },
-            },
-          ]
-        : [];
+      if (
+        typeof tool.name !== "string" ||
+        !/^[a-zA-Z0-9_.:-]{1,128}$/.test(tool.name)
+      )
+        return [];
+      const description =
+        typeof tool.description === "string"
+          ? tool.description.slice(0, 10_000)
+          : undefined;
+      const schema =
+        typeof tool.inputSchema === "object" && tool.inputSchema
+          ? (tool.inputSchema as Record<string, unknown>)
+          : { type: "object" };
+      if (Buffer.byteLength(JSON.stringify(schema), "utf8") > 100_000)
+        return [];
+      return [
+        {
+          name: tool.name,
+          ...(description ? { description } : {}),
+          inputSchema: schema,
+        },
+      ];
     });
   }
 
@@ -137,6 +147,8 @@ export class McpStdioClient {
   ): Promise<unknown> {
     if (!/^[a-zA-Z0-9_.:-]{1,128}$/.test(name))
       throw new Error("Invalid MCP tool name");
+    if (Buffer.byteLength(JSON.stringify(arguments_), "utf8") > 100_000)
+      throw new Error("MCP tool arguments exceed the 100000-byte limit");
     const response = await this.request(
       "tools/call",
       {
@@ -184,9 +196,15 @@ export class McpStdioClient {
         new McpClientError("MCP request cancelled", "cancelled"),
       );
     const id = `${++this.nextId}-${randomUUID()}`;
-    this.process.stdin.write(
-      `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`,
-    );
+    const serialized = JSON.stringify({ jsonrpc: "2.0", id, method, params });
+    if (Buffer.byteLength(serialized, "utf8") > 250_000)
+      return Promise.reject(
+        new McpClientError(
+          "MCP request exceeds the 250000-byte limit",
+          "protocol",
+        ),
+      );
+    this.process.stdin.write(`${serialized}\n`);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);

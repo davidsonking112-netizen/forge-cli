@@ -474,7 +474,7 @@ test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MC
     assert.match(explanation.stdout, /"nextAction"/);
     const context = spawnSync(
       process.execPath,
-      [cli, "context", "find relevant tests", "--workspace", root],
+      [cli, "context", "find relevant tests", `--workspace=${root}`],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -659,8 +659,8 @@ test("external server config stays disabled and rejects unsafe IDs", async () =>
     );
     const registry = await loadExternalServers(config);
     assert.equal(registry.list()[0].enabled, false);
-    assert.equal(registry.list()[1].enabled, true);
-    assert.equal(registry.list()[1].explicitConsent, true);
+    assert.equal(registry.list()[1].enabled, false);
+    assert.equal(registry.list()[1].explicitConsent, false);
     assert.throws(
       () =>
         new ExternalToolRegistry().register({
@@ -675,6 +675,57 @@ test("external server config stays disabled and rejects unsafe IDs", async () =>
     );
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("configuration writes do not follow symlinks", async () => {
+  const root = await fixture();
+  const configHome = await mkdtemp(
+    path.join(os.tmpdir(), "forge-config-home-"),
+  );
+  const outside = path.join(root, "outside.txt");
+  try {
+    await writeFile(outside, "do-not-change\n");
+    await mkdir(path.join(configHome, "forge"));
+    await symlink(outside, path.join(configHome, "forge", "config.json"));
+    const cli = path.resolve("dist/apps/forge-cli/src/main.js");
+    const result = spawnSync(
+      process.execPath,
+      [cli, "config", "set", "mode", "safe"],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: { ...process.env, XDG_CONFIG_HOME: configHome },
+      },
+    );
+    assert.notEqual(result.status, 0);
+    assert.equal(await readFile(outside, "utf8"), "do-not-change\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(configHome, { recursive: true, force: true });
+  }
+});
+
+test("MCP tool-list bounds reject excessive tool counts", async () => {
+  const serverScript =
+    "process.stdin.setEncoding('utf8'); let buffer=''; process.stdin.on('data', chunk => { buffer += chunk; for (const line of buffer.split('\\n').slice(0, -1)) { const request = JSON.parse(line); if (request.id && request.method === 'initialize') process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,result:{protocolVersion:'2025-06-18',capabilities:{}}})+'\\n'); if (request.id && request.method === 'tools/list') process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,result:{tools:Array.from({length:501}, (_, index) => ({name:'tool.'+index,inputSchema:{type:'object'}}))}})+'\\n'); } buffer = buffer.slice(buffer.lastIndexOf('\\n') + 1); });";
+  const client = new McpStdioClient(
+    {
+      id: "tool-count",
+      command: process.execPath,
+      args: ["-e", serverScript],
+      enabled: true,
+      explicitConsent: true,
+      trust: "untrusted",
+      defaultRisk: "network",
+    },
+    3000,
+  );
+  try {
+    await client.start();
+    await assert.rejects(client.listTools(), /500-tool limit/);
+  } finally {
+    client.close();
   }
 });
 

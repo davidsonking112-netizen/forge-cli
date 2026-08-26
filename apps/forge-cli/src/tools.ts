@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { lstatSync, promises as fs } from "node:fs";
+import { constants as fsConstants, lstatSync, promises as fs } from "node:fs";
 import path from "node:path";
 import type {
   RiskClass,
@@ -67,6 +67,36 @@ function boundedInt(
       : NaN;
   if (!Number.isSafeInteger(parsed)) return fallback;
   return Math.max(minimum, Math.min(maximum, parsed));
+}
+
+async function writeNoFollow(
+  target: string,
+  content: string | Uint8Array,
+): Promise<void> {
+  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+  let handle;
+  try {
+    handle = await fs.open(
+      target,
+      fsConstants.O_WRONLY | fsConstants.O_TRUNC | noFollow,
+      0o600,
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    handle = await fs.open(
+      target,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_EXCL |
+        noFollow,
+      0o600,
+    );
+  }
+  try {
+    await handle.writeFile(content);
+  } finally {
+    await handle.close();
+  }
 }
 
 const sensitiveNames = [
@@ -740,7 +770,7 @@ export class WorkspaceTools {
         if (change.delete) await fs.unlink(change.target);
         else {
           await fs.mkdir(path.dirname(change.target), { recursive: true });
-          await fs.writeFile(change.target, change.content, "utf8");
+          await writeNoFollow(change.target, change.content);
         }
       }
     } catch (error) {
@@ -762,9 +792,12 @@ export class WorkspaceTools {
       throw new Error("Checkpoint belongs to a different workspace");
     for (const file of manifest.files) {
       const target = this.resolveSafe(file.path);
-      if (file.existed && file.backup)
-        await fs.copyFile(path.join(this.checkpointRoot, file.backup), target);
-      else await fs.unlink(target).catch(() => undefined);
+      if (file.existed && file.backup) {
+        const backup = await fs.readFile(
+          path.join(this.checkpointRoot, file.backup),
+        );
+        await writeNoFollow(target, backup);
+      } else await fs.unlink(target).catch(() => undefined);
     }
   }
 
@@ -798,6 +831,8 @@ export class WorkspaceTools {
       1_000_000,
     );
     const shell = args.shell === true;
+    if (shell && args.allowShell !== true)
+      throw new Error("Shell execution requires explicit allowShell=true");
     return await new Promise((resolve, reject) => {
       const child = spawn(command, commandArgs, {
         cwd: this.root,

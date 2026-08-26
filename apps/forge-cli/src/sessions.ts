@@ -54,6 +54,8 @@ export interface SessionRecord {
   events: ForgeEvent[];
 }
 
+const MAX_IN_MEMORY_EVENTS = 500;
+
 export class SessionStore {
   private readonly directory: string;
 
@@ -148,6 +150,8 @@ export class SessionStore {
     if (!Array.isArray(record.verification)) record.verification = [];
     const sanitized = this.sanitizeEvent(event);
     record.events.push(sanitized);
+    if (record.events.length > MAX_IN_MEMORY_EVENTS)
+      record.events.splice(0, record.events.length - MAX_IN_MEMORY_EVENTS);
     record.updatedAt = new Date().toISOString();
     if (sanitized.type === "agent.plan") {
       record.plan = {
@@ -371,10 +375,7 @@ export class SessionStore {
   }
 
   private sanitizeEvent(event: ForgeEvent): ForgeEvent {
-    const copy = structuredClone(event) as ForgeEvent;
-    if (copy.type === "tool.proposal" && copy.tool === "process.run")
-      copy.arguments = redactValue(copy.arguments) as Record<string, unknown>;
-    return copy;
+    return redactValue(structuredClone(event)) as ForgeEvent;
   }
 }
 
