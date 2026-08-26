@@ -125,13 +125,25 @@ test("session persistence retains bounded events and rejects invalid IDs", async
   try {
     const store = new SessionStore(state);
     const record = await store.create("/tmp/fixture");
+    assert.equal(record.status, "running");
+    assert.equal(record.resumeCount, 0);
     await store.append(record, {
       ...createEnvelope("agent.text", record.id),
       type: "agent.text",
       text: "hello",
     });
+    await store.append(record, {
+      ...createEnvelope("agent.plan", record.id),
+      type: "agent.plan",
+      goal: "Inspect fixture",
+      steps: [{ id: "inspect", description: "Read files", status: "active" }],
+      assumptions: [],
+      verification: ["npm test"],
+    });
     const restored = await store.read(record.id);
-    assert.equal(restored.events.length, 1);
+    assert.equal(restored.events.length, 2);
+    assert.equal(restored.plan?.goal, "Inspect fixture");
+    assert.equal(restored.status, "running");
     assert.equal((await store.list()).length, 1);
     await assert.rejects(store.read("not-a-session"), /Invalid session ID/);
     await store.remove(record.id);
@@ -186,7 +198,7 @@ test("no-record supervisor runs do not persist session data", async () => {
   }
 });
 
-test("v0.5 CLI exposes safe review, ACP, policy, extension, MCP, and PR workflows", async () => {
+test("v0.6 CLI exposes safe review, ACP, policy, extension, MCP, and PR workflows", async () => {
   const root = await fixture();
   try {
     const config = path.join(root, "integrations.json");
@@ -197,6 +209,33 @@ test("v0.5 CLI exposes safe review, ACP, policy, extension, MCP, and PR workflow
       }),
     );
     const cli = path.resolve("dist/apps/forge-cli/src/main.js");
+    const profiles = spawnSync(process.execPath, [cli, "profiles"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    assert.equal(profiles.status, 0);
+    assert.match(profiles.stdout, /research/);
+    const indexState = path.join(root, "index-state");
+    const indexEnv = { ...process.env, XDG_STATE_HOME: indexState };
+    const indexBuild = spawnSync(
+      process.execPath,
+      [cli, "index", "build", "--workspace", root],
+      { cwd: process.cwd(), encoding: "utf8", env: indexEnv },
+    );
+    assert.equal(indexBuild.status, 0);
+    const indexShow = spawnSync(
+      process.execPath,
+      [cli, "index", "show", "--workspace", root],
+      { cwd: process.cwd(), encoding: "utf8", env: indexEnv },
+    );
+    assert.equal(indexShow.status, 0);
+    assert.match(indexShow.stdout, /\"files\"/);
+    const indexClear = spawnSync(
+      process.execPath,
+      [cli, "index", "clear", "--workspace", root],
+      { cwd: process.cwd(), encoding: "utf8", env: indexEnv },
+    );
+    assert.equal(indexClear.status, 0);
     const listed = spawnSync(
       process.execPath,
       [cli, "mcp", "list", "--config", config],
@@ -208,6 +247,39 @@ test("v0.5 CLI exposes safe review, ACP, policy, extension, MCP, and PR workflow
     assert.equal(listed.status, 0);
     assert.match(listed.stdout, /\"id\": \"helper\"/);
     assert.match(listed.stdout, /\"enabled\": false/);
+    const validated = spawnSync(
+      process.execPath,
+      [cli, "mcp", "validate", "--config", config],
+      { cwd: process.cwd(), encoding: "utf8" },
+    );
+    assert.equal(validated.status, 0);
+    assert.match(validated.stdout, /\"valid\": true/);
+    const malformedConfig = path.join(root, "malformed-integrations.json");
+    await writeFile(malformedConfig, "{not-json");
+    const malformed = spawnSync(
+      process.execPath,
+      [cli, "mcp", "validate", "--config", malformedConfig],
+      { cwd: process.cwd(), encoding: "utf8" },
+    );
+    assert.equal(malformed.status, 1);
+    assert.match(malformed.stdout, /not valid JSON/);
+    const duplicateConfig = path.join(root, "duplicate-integrations.json");
+    await writeFile(
+      duplicateConfig,
+      JSON.stringify({
+        servers: [
+          { id: "duplicate", command: process.execPath, args: [] },
+          { id: "duplicate", command: process.execPath, args: [] },
+        ],
+      }),
+    );
+    const duplicate = spawnSync(
+      process.execPath,
+      [cli, "mcp", "validate", "--config", duplicateConfig],
+      { cwd: process.cwd(), encoding: "utf8" },
+    );
+    assert.equal(duplicate.status, 1);
+    assert.match(duplicate.stdout, /duplicate MCP server id/);
     const denied = spawnSync(
       process.execPath,
       [cli, "mcp", "call", "helper", "local.echo", "{}", "--config", config],

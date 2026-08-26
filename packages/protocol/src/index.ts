@@ -36,6 +36,7 @@ export interface SessionStartEvent extends BaseEvent {
   workspace: string;
   policy: PolicyMode;
   provider: string;
+  profile?: string;
   capabilities: string[];
   prompt?: string;
   context?: unknown;

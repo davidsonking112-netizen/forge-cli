@@ -10,7 +10,7 @@ from unittest import mock
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from forge_agent.orchestration import BoundedOrchestrator
 from forge_agent.providers import MockProvider, OpenAICompatibleProvider, ProviderReply, redact
-from forge_agent.worker import main
+from forge_agent.worker import MockAgent, main
 
 
 class WorkerTests(unittest.TestCase):
@@ -86,6 +86,22 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(delegations), 2)
         self.assertTrue(all(event["status"] == "completed" for event in delegations))
         self.assertTrue(any(event["type"] == "session.complete" for event in events))
+
+    def test_failed_verification_reports_actual_evidence(self):
+        agent = MockAgent("verification")
+        agent.stage = "verify"
+        events = agent.on_mock_tool_result(
+            {
+                "tool": "process.run",
+                "ok": False,
+                "error": {"code": "PROCESS_EXIT", "message": "exit 2"},
+                "output": {"command": "pytest", "exitCode": 2, "output": "failed test"},
+            }
+        )
+        completion = next(event for event in events if event["type"] == "session.complete")
+        self.assertEqual(completion["status"], "failed")
+        self.assertEqual(completion["checks"][0]["exitCode"], 2)
+        self.assertEqual(completion["checks"][0]["output"], "failed test")
 
     def test_provider_errors_are_redacted(self):
         message = redact('api_key=sk-1234567890 secret=visible token=abc123')

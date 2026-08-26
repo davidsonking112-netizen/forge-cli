@@ -27,6 +27,15 @@ import {
   summarizeUnifiedDiff,
 } from "../dist/apps/forge-cli/src/diff.js";
 import { loadPolicyPack } from "../dist/apps/forge-cli/src/policy.js";
+import {
+  getAutonomyProfile,
+  listAutonomyProfiles,
+} from "../dist/apps/forge-cli/src/profiles.js";
+import {
+  buildRepositoryIndex,
+  clearRepositoryIndex,
+  readRepositoryIndex,
+} from "../dist/apps/forge-cli/src/index.js";
 
 async function tempWorkspace() {
   const directory = await mkdtemp(path.join(os.tmpdir(), "forge-test-"));
@@ -73,6 +82,20 @@ test("extension manifests load as validated metadata only", async () => {
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("autonomy profiles are bounded and default to approval-gated local testing", () => {
+  assert.deepEqual(getAutonomyProfile().allowedRisks, [
+    "read-only",
+    "reversible-write",
+    "local-execution",
+  ]);
+  assert.deepEqual(getAutonomyProfile("research").allowedRisks, ["read-only"]);
+  assert.equal(listAutonomyProfiles().length, 4);
+  assert.throws(
+    () => getAutonomyProfile("unrestricted"),
+    /Unknown autonomy profile/,
+  );
 });
 
 test("policy packs can only add validated restrictions", async () => {
@@ -338,6 +361,28 @@ test("workspace tools reject symlink paths", async () => {
   } finally {
     await rm(directory, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("repository index stores bounded metadata and can be cleared explicitly", async () => {
+  const directory = await tempWorkspace();
+  const state = await mkdtemp(path.join(os.tmpdir(), "forge-index-state-"));
+  const previousState = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = state;
+  try {
+    const index = await buildRepositoryIndex(directory);
+    assert.equal(index.root, directory);
+    assert.ok(index.files.length > 0);
+    assert.ok(index.files.every((file) => !("content" in file)));
+    const restored = await readRepositoryIndex(directory);
+    assert.equal(restored.files.length, index.files.length);
+    await clearRepositoryIndex(directory);
+    await assert.rejects(readRepositoryIndex(directory));
+  } finally {
+    if (previousState === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previousState;
+    await rm(directory, { recursive: true, force: true });
+    await rm(state, { recursive: true, force: true });
   }
 });
 

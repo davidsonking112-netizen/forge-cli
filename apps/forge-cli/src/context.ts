@@ -10,6 +10,7 @@ export interface ContextFile {
   bytes: number;
   content?: string;
   symbols?: string[];
+  reasons?: string[];
 }
 
 export interface RepositoryContext {
@@ -69,13 +70,29 @@ function score(
   terms: string[],
   changedFiles: Set<string>,
 ): number {
+  return selectionReasons(filePath, terms, changedFiles).reduce(
+    (total, reason) => total + reason.weight,
+    0,
+  );
+}
+
+function selectionReasons(
+  filePath: string,
+  terms: string[],
+  changedFiles: Set<string>,
+): Array<{ label: string; weight: number }> {
   const lower = filePath.toLowerCase();
-  let value = priorityNames.includes(path.basename(lower)) ? 10 : 0;
-  if (changedFiles.has(filePath)) value += 20;
-  if (lower.includes("test") || lower.includes("spec")) value += 3;
+  const reasons: Array<{ label: string; weight: number }> = [];
+  if (priorityNames.includes(path.basename(lower)))
+    reasons.push({ label: "project metadata", weight: 10 });
+  if (changedFiles.has(filePath))
+    reasons.push({ label: "changed file", weight: 20 });
+  if (lower.includes("test") || lower.includes("spec"))
+    reasons.push({ label: "test-like path", weight: 3 });
   for (const term of terms)
-    if (term.length > 2 && lower.includes(term)) value += 5;
-  return value;
+    if (term.length > 2 && lower.includes(term))
+      reasons.push({ label: `prompt match: ${term}`, weight: 5 });
+  return reasons;
 }
 
 async function collect(root: string): Promise<ContextFile[]> {
@@ -214,6 +231,9 @@ export async function buildRepositoryContext(
         content.slice(0, 24_000) +
         (content.length > 24_000 ? "\n...[truncated]" : ""),
       symbols: extractSymbols(content),
+      reasons: selectionReasons(file.path, terms, changedFileSet).map(
+        (reason) => reason.label,
+      ),
     });
   }
   const has = (name: string) =>

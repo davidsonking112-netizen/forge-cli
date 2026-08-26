@@ -172,6 +172,10 @@ class MockAgent:
         if not payload.get("ok"):
             self.stage = "failed"
             error = payload.get("error") or {"code": "TOOL_FAILED", "message": "The tool failed", "retryable": False}
+            if tool == "process.run" and self.stage == "failed":
+                output = payload.get("output") if isinstance(payload.get("output"), dict) else {}
+                check = {"command": str(output.get("command", "verification")), "ok": False, "exitCode": output.get("exitCode"), "output": str(output.get("output", error.get("message", "The tool failed")))}
+                return [event("agent.text", self.session_id, text=f"Verification failed: {error.get('message', 'the command failed')}"), event("session.complete", self.session_id, status="failed", summary="The bounded verification command failed.", changedFiles=self.changed_files, checks=[check])]
             return [event("agent.text", self.session_id, text=f"I could not continue because {error.get('message', 'the tool failed')}"), event("session.complete", self.session_id, status="failed", summary="The requested tool failed before the task could be completed.", changedFiles=self.changed_files, checks=[])]
         if tool == "workspace.list" and self.stage == "inspect":
             self.stage = "plan"
@@ -199,7 +203,11 @@ class MockAgent:
             self.stage = "complete"
             self.steps[3]["status"] = "complete"
             output = payload.get("output") if isinstance(payload.get("output"), dict) else {}
-            return [event("agent.text", self.session_id, text="The verification command completed. Forge will include its exit status in the session record."), event("session.complete", self.session_id, status="completed", summary="Approved file change applied and bounded verification completed.", changedFiles=self.changed_files, checks=[{"command": str(output.get("command", "verification")), "ok": True, "exitCode": 0, "output": str(output.get("output", ""))}])]
+            ok = bool(payload.get("ok")) and output.get("exitCode", 0) == 0
+            check = {"command": str(output.get("command", "verification")), "ok": ok, "exitCode": output.get("exitCode", 0), "output": str(output.get("output", ""))}
+            status = "completed" if ok else "failed"
+            summary = "Approved file change applied and bounded verification completed." if ok else "Approved file change applied but bounded verification failed."
+            return [event("agent.text", self.session_id, text="The verification command completed. Forge will include its exit status in the session record."), event("session.complete", self.session_id, status=status, summary=summary, changedFiles=self.changed_files, checks=[check])]
         return [event("agent.text", self.session_id, text="The tool result was received. No further mock-provider action is required.")]
 
 

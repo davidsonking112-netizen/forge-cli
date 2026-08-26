@@ -6,7 +6,7 @@ The TypeScript/Node.js supervisor owns the command-line interface, terminal even
 
 ## Status
 
-Forge v0.5.5 is a focused hardening release. It strengthens unified-diff edge-case validation, approval decision reporting, session observability, MCP/ACP reliability, changed-file context prioritization, deny-only policy packs, extension-manifest validation, and local Git contribution drafts while retaining the local-first safety model.
+Forge v0.6.0 adds bounded repository intelligence, explainable context selection, metadata-only local indexing, resumable session lifecycle state, evidence-based verification results, and named autonomy profiles while retaining the local-first safety model.
 
 ## Development requirements
 
@@ -73,9 +73,9 @@ forge review change.patch
 forge apply-diff change.patch --workspace /path/to/repository
 ```
 
-MCP is opt-in per command. Configure servers in `~/.config/forge/integrations.json`, inspect them with `forge mcp list`, use `forge mcp enable <id>` or `forge mcp disable <id>` only after interactive approval, and use `forge mcp tools <id> --enable` for discovery. Calls use `forge mcp call <id> <tool> '{}' --enable` and require an interactive `YES` confirmation.
+MCP is opt-in per command. Configure servers in `~/.config/forge/integrations.json`, validate the JSON and server metadata without launching anything with `forge mcp validate`, and inspect them with `forge mcp list`. Use `forge mcp enable <id>` or `forge mcp disable <id>` only after interactive approval, and use `forge mcp tools <id> --enable` for discovery. Calls use `forge mcp call <id> <tool> '{}' --enable` and require an interactive `YES` confirmation.
 
-Adapt local editor-style events through the ACP boundary with `printf '%s\\n' '{"jsonrpc":"2.0","id":1,"method":"prompt","params":{"prompt":"inspect"}}' | forge acp serve`. Validate a stricter policy pack with `forge policy validate policy.json`, inspect the immutable ceiling with `forge policy effective policy.json`, load it for a run with `--policy-pack policy.json`, and inspect local extension manifests with `forge extensions list [directory]`. Use `forge context "find the relevant tests"` to inspect changed-file prioritization and the verification plan.
+Adapt local editor-style events through the ACP boundary with `printf '%s\\n' '{"jsonrpc":"2.0","id":1,"method":"prompt","params":{"prompt":"inspect"}}' | forge acp serve`. Validate a stricter policy pack with `forge policy validate policy.json`, inspect the immutable ceiling with `forge policy effective policy.json`, load it for a run with `--policy-pack policy.json`, and inspect local extension manifests with `forge extensions list [directory]`. Use `forge context "find the relevant tests"` to inspect changed-file prioritization and the verification plan. Use `forge index build|show|clear` for an explicit, local metadata-only repository index, and `forge profiles` to inspect bounded autonomy profiles. Select one per run with `--profile research|reviewed-edit|local-test|maintenance`; the default remains approval-gated `local-test` behavior.
 
 ## Safety model
 

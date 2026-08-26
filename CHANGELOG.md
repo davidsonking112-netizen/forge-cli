@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0 — 2026-08-26
+
+Forge v0.6 adds bounded repository intelligence with explainable context-selection reasons and an explicit local metadata-only repository index. Index files contain paths, sizes, and bounded symbols rather than file contents, and are stored under Forge local state only when the user requests `forge index build`.
+
+Sessions now track lifecycle status, resumable plan snapshots, and resume counts. Interrupted sessions are marked distinctly, `forge session resume` records continuation activity, and `forge inspect` reports status, profile, plan state, resume count, approval decisions, tool metrics, delegation, and verification evidence.
+
+Verification results now reflect the actual supervisor command outcome, including nonzero exit codes and bounded output. Named autonomy profiles (`research`, `reviewed-edit`, `local-test`, and `maintenance`) can only restrict risk classes below Forge’s immutable safety ceiling; the default preserves approval-gated local testing behavior.
+
+The v0.6 release remains local-first. It does not add remote execution, hidden background agents, automatic pushes or pull requests, unrestricted autonomy, cloud-default execution, web browsing, non-local telemetry, remote MCP transports, or executable third-party extensions.
+
 ## 0.5.5 — 2026-08-26
 
 Forge v0.5.5 hardens the unified-diff engine against binary patches, duplicate file entries, oversized hunk coordinates, stale context, unsafe paths, and mixed file operations. Review and application remain separate workflows, with transactional checkpoints and reversible changes.

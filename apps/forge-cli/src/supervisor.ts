@@ -8,6 +8,7 @@ import {
   parseForgeEvent,
   type ForgeEvent,
   type PolicyMode,
+  type RiskClass,
   type ToolProposalEvent,
   type ToolResultEvent,
 } from "../../../packages/protocol/src/index.js";
@@ -15,6 +16,7 @@ import { PolicyEngine, TOOL_METADATA, WorkspaceTools } from "./tools.js";
 import { SessionStore, type SessionRecord } from "./sessions.js";
 import { buildRepositoryContext } from "./context.js";
 import type { PolicyPack } from "./policy.js";
+import { getAutonomyProfile, type AutonomyProfileName } from "./profiles.js";
 
 export interface RunOptions {
   prompt: string;
@@ -27,6 +29,7 @@ export interface RunOptions {
   maxTotalTurns?: number;
   record?: boolean;
   policyPack?: PolicyPack;
+  autonomyProfile?: AutonomyProfileName;
   onEvent?: (event: ForgeEvent) => void;
   approve?: (
     proposal: ToolProposalEvent,
@@ -57,13 +60,32 @@ export class ForgeSupervisor {
             workspace,
             createdAt: timestamp,
             updatedAt: timestamp,
+            status: "running",
+            resumeCount: 0,
             events: [],
           }
         : await this.sessions.create(workspace);
-    const policy = new PolicyEngine(
-      options.policy ?? "safe",
-      options.policyPack,
+    const profile = getAutonomyProfile(options.autonomyProfile);
+    const allRisks: RiskClass[] = [
+      "read-only",
+      "reversible-write",
+      "local-execution",
+      "destructive",
+      "network",
+      "credential-sensitive",
+    ];
+    const profileDeniedRisks = allRisks.filter(
+      (risk) => !profile.allowedRisks.includes(risk),
     );
+    const policy = new PolicyEngine(options.policy ?? "safe", {
+      denyRisks: [
+        ...profileDeniedRisks,
+        ...(options.policyPack?.denyRisks ?? []),
+      ],
+      ...(options.policyPack?.denyTools
+        ? { denyTools: options.policyPack.denyTools }
+        : {}),
+    });
     const tools = new WorkspaceTools(workspace);
     const worker = this.startWorker(options);
     const repositoryContext = await buildRepositoryContext(
@@ -195,6 +217,7 @@ export class ForgeSupervisor {
       workspace,
       policy: options.policy ?? "safe",
       provider: process.env.FORGE_PROVIDER ?? "mock",
+      profile: profile.name,
       capabilities: Object.keys(TOOL_METADATA),
       prompt: options.prompt,
       context: repositoryContext,
@@ -203,6 +226,8 @@ export class ForgeSupervisor {
     send(startEvent);
     await processing;
     if (!sessionResult) {
+      if (options.record !== false)
+        await this.sessions.markInterrupted(session);
       sessionResult = {
         sessionId: session.id,
         status: "failed",
@@ -220,6 +245,11 @@ export class ForgeSupervisor {
 
   public async readSession(id: string): Promise<SessionRecord> {
     return this.sessions.read(id);
+  }
+
+  public async markSessionResumed(id: string): Promise<void> {
+    const record = await this.sessions.read(id);
+    await this.sessions.incrementResume(record);
   }
 
   public async removeSession(id: string): Promise<void> {

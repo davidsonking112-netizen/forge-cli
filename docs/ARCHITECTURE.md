@@ -18,9 +18,9 @@ Model provider
 
 ## Agent turn
 
-A turn starts with a bounded repository context. The context engine detects the project type and package manager, respects standard generated directories and project ignore patterns, loads `FORGE.md` as untrusted guidance, ranks likely relevant files, and reports hashes and truncation. The worker can then ask the supervisor to inspect files, search text, inspect Git state, or perform other registered tools.
+A turn starts with a bounded repository context. The context engine detects the project type and package manager, respects standard generated directories and project ignore patterns, loads `FORGE.md` as untrusted guidance, ranks likely relevant files, records explainable selection reasons, and reports hashes and truncation. An opt-in local repository index stores only bounded metadata and symbols under Forge state; it does not persist file contents. The worker can then ask the supervisor to inspect files, search text, inspect Git state, or perform other registered tools.
 
-The model’s provider response is normalized into text and tool calls. A tool call becomes a structured Forge proposal with a risk class. Forge executes read-only tools automatically inside the approved workspace. Writes and local processes remain visible and approval-gated by default. Multi-file edits validate optional original hashes, create a checkpoint manifest, write the batch, and restore the checkpoint if a write fails partway through.
+The model’s provider response is normalized into text and tool calls. A tool call becomes a structured Forge proposal with a risk class. Forge executes read-only tools automatically inside the approved workspace. Writes and local processes remain visible and approval-gated by default. Named autonomy profiles can further restrict risk classes but cannot expand the global safety ceiling. Multi-file edits validate optional original hashes, create a checkpoint manifest, write the batch, and restore the checkpoint if a write fails partway through.
 
 ## Bounded specialist orchestration
 
@@ -28,21 +28,25 @@ The model’s provider response is normalized into text and tool calls. A tool c
 
 This design is intentionally not unrestricted autonomous delegation. It is a bounded analysis pipeline that makes specialist activity visible while preserving one authority for filesystem and process actions.
 
+## Session lifecycle and recovery
+
+Session records track `running`, `completed`, `failed`, `cancelled`, and `interrupted` states. Each `agent.plan` event updates a bounded plan snapshot in the record. If a worker exits without a completion event, the supervisor marks the recorded session interrupted rather than presenting a false success. `forge session resume` starts a new supervised run from the original prompt and increments the source session’s resume count; it does not silently replay mutations.
+
 ## Protocol
 
 Every message is one JSON object per line with `protocol`, `id`, `sessionId`, `type`, and `timestamp`. Standard output is reserved for protocol messages; standard error is reserved for diagnostics. Every tool proposal has a named tool, risk classification, JSON arguments, and reason. Every tool result reports approval, success, duration, and either bounded output or a structured error. The protocol includes delegation events so the line renderer, TUI, session records, and inspection command can account for specialist work.
 
-The contract is provider-neutral. OpenAI-compatible chat-completion responses are normalized into the same internal events. MCP is a local stdio JSON-RPC client used from explicit CLI commands, while ACP is a bounded local JSON-RPC adapter rather than a complete editor plugin or remote transport.
+The contract is provider-neutral. OpenAI-compatible chat-completion responses are normalized into the same internal events. MCP is a local stdio JSON-RPC client used from explicit CLI commands, while ACP is a bounded local JSON-RPC adapter rather than a complete editor plugin or remote transport. Verification results are generated from supervisor tool results, including actual exit codes, bounded output, and failure state rather than model assertions.
 
 ## Editing and policy extension boundaries
 
 Unified diffs are parsed into bounded file patches and hunks before they reach the supervisor. The applier validates paths, context lines, declared line counts, file existence, and optional original hashes. It supports modifications, additions, deletions, and renames through the existing checkpoint transaction. `forge review` is read-only; `forge apply-diff` requires interactive approval.
 
-Policy packs may only add deny rules for risk classes or built-in tools. Extension loading currently validates local JSON manifests and exposes metadata; it does not execute arbitrary extension code or allow replacement of built-in tools. Both surfaces remain below the global safety ceiling.
+Policy packs may only add deny rules for risk classes or built-in tools. Extension loading currently validates local JSON manifests against a typed metadata contract and exposes metadata; it does not execute arbitrary extension code, load third-party modules, or allow replacement of built-in tools. Both surfaces remain below the global safety ceiling.
 
 ## MCP boundary
 
-MCP servers are loaded from the local integrations configuration, remain disabled by default, and are represented as untrusted external processes. `forge mcp tools <id> --enable` may initialize an explicitly enabled stdio server for tool discovery. `forge mcp call <id> <tool> [json] --enable` additionally requires an interactive `YES` approval before invocation. The child receives a minimal environment, communication is JSON-RPC over stdio, requests have timeouts, and response lines have size limits. Forge does not support remote MCP transports or persistent server enablement in v0.5.
+MCP servers are loaded from the local integrations configuration, remain disabled by default, and are represented as untrusted external processes. `forge mcp validate` checks configuration size, shape, identifiers, arguments, and duplicate IDs without launching a server. `forge mcp tools <id> --enable` may initialize an explicitly enabled stdio server for tool discovery. `forge mcp call <id> <tool> [json] --enable` additionally requires an interactive `YES` approval before invocation. The child receives a minimal environment, communication is JSON-RPC over stdio, requests have timeouts, and response lines have size limits. Forge does not support remote MCP transports or a remote server marketplace in v0.6.
 
 ## Runtime boundaries
 

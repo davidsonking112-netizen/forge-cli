@@ -3,11 +3,24 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ForgeEvent } from "../../../packages/protocol/src/index.js";
 
+export type SessionStatus =
+  "running" | "completed" | "failed" | "cancelled" | "interrupted";
+
+export interface PlanSnapshot {
+  goal: string;
+  steps: Array<{ id: string; description: string; status: string }>;
+  assumptions: string[];
+  verification: string[];
+}
+
 export interface SessionRecord {
   id: string;
   workspace: string;
   createdAt: string;
   updatedAt: string;
+  status: SessionStatus;
+  resumeCount: number;
+  plan?: PlanSnapshot;
   events: ForgeEvent[];
 }
 
@@ -32,6 +45,8 @@ export class SessionStore {
       workspace,
       createdAt: timestamp,
       updatedAt: timestamp,
+      status: "running",
+      resumeCount: 0,
       events: [],
     };
     await this.save(record);
@@ -53,19 +68,65 @@ export class SessionStore {
   }
 
   public async append(record: SessionRecord, event: ForgeEvent): Promise<void> {
-    record.events.push(this.sanitizeEvent(event));
+    const sanitized = this.sanitizeEvent(event);
+    record.events.push(sanitized);
+    record.updatedAt = new Date().toISOString();
+    if (sanitized.type === "agent.plan")
+      record.plan = {
+        goal: sanitized.goal,
+        steps: sanitized.steps.map(({ id, description, status }) => ({
+          id,
+          description,
+          status,
+        })),
+        assumptions: [...sanitized.assumptions],
+        verification: [...sanitized.verification],
+      };
+    if (sanitized.type === "session.complete") record.status = sanitized.status;
+    if (sanitized.type === "session.cancel") record.status = "cancelled";
+    await this.save(record);
+  }
+
+  public async incrementResume(record: SessionRecord): Promise<void> {
+    record.resumeCount += 1;
     record.updatedAt = new Date().toISOString();
     await this.save(record);
   }
 
+  public async markInterrupted(record: SessionRecord): Promise<void> {
+    if (record.status === "running") {
+      record.status = "interrupted";
+      record.updatedAt = new Date().toISOString();
+      await this.save(record);
+    }
+  }
+
   public async list(): Promise<
-    Array<Pick<SessionRecord, "id" | "workspace" | "createdAt" | "updatedAt">>
+    Array<
+      Pick<
+        SessionRecord,
+        | "id"
+        | "workspace"
+        | "createdAt"
+        | "updatedAt"
+        | "status"
+        | "resumeCount"
+      >
+    >
   > {
     const entries = await fs
       .readdir(this.directory, { withFileTypes: true })
       .catch(() => []);
     const records: Array<
-      Pick<SessionRecord, "id" | "workspace" | "createdAt" | "updatedAt">
+      Pick<
+        SessionRecord,
+        | "id"
+        | "workspace"
+        | "createdAt"
+        | "updatedAt"
+        | "status"
+        | "resumeCount"
+      >
     > = [];
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
@@ -76,6 +137,8 @@ export class SessionStore {
           workspace: record.workspace,
           createdAt: record.createdAt,
           updatedAt: record.updatedAt,
+          status: record.status,
+          resumeCount: record.resumeCount,
         });
     }
     return records.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -90,7 +153,13 @@ export class SessionStore {
     const record = JSON.parse(content) as SessionRecord;
     if (!record || record.id !== id || !Array.isArray(record.events))
       throw new Error("Invalid session record");
-    return record;
+    return {
+      ...record,
+      status: record.status ?? "interrupted",
+      resumeCount: Number.isSafeInteger(record.resumeCount)
+        ? record.resumeCount
+        : 0,
+    };
   }
 
   public async remove(id: string): Promise<void> {

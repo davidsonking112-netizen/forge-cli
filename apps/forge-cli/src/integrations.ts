@@ -149,6 +149,64 @@ export class ExternalToolRegistry {
   }
 }
 
+export async function validateExternalServerConfig(
+  configPath: string,
+): Promise<{ valid: boolean; servers: number; errors: string[] }> {
+  const errors: string[] = [];
+  const content = await fs.readFile(configPath, "utf8").catch(() => "{}");
+  if (Buffer.byteLength(content, "utf8") > 100_000)
+    return {
+      valid: false,
+      servers: 0,
+      errors: ["MCP configuration exceeds the 100000-byte limit"],
+    };
+  let parsed: { servers?: unknown };
+  try {
+    parsed = JSON.parse(content) as { servers?: unknown };
+  } catch {
+    return {
+      valid: false,
+      servers: 0,
+      errors: ["MCP configuration is not valid JSON"],
+    };
+  }
+  if (!Array.isArray(parsed.servers))
+    return { valid: true, servers: 0, errors: [] };
+  const seen = new Set<string>();
+  parsed.servers.forEach((value, index) => {
+    if (!value || typeof value !== "object") {
+      errors.push(`servers[${index}] must be an object`);
+      return;
+    }
+    const item = value as Record<string, unknown>;
+    if (typeof item.id !== "string" || !/^[a-z][a-z0-9_-]{1,63}$/.test(item.id))
+      errors.push(`servers[${index}].id is invalid`);
+    else if (seen.has(item.id))
+      errors.push(`duplicate MCP server id: ${item.id}`);
+    else seen.add(item.id);
+    if (
+      typeof item.command !== "string" ||
+      !item.command ||
+      item.command.includes("\\0")
+    )
+      errors.push(`servers[${index}].command is invalid`);
+    if (
+      item.args !== undefined &&
+      (!Array.isArray(item.args) ||
+        item.args.some((arg) => typeof arg !== "string"))
+    )
+      errors.push(`servers[${index}].args must be an array of strings`);
+    if (item.enabled !== undefined && typeof item.enabled !== "boolean")
+      errors.push(`servers[${index}].enabled must be boolean`);
+    if (
+      item.explicitConsent !== undefined &&
+      typeof item.explicitConsent !== "boolean"
+    )
+      errors.push(`servers[${index}].explicitConsent must be boolean`);
+  });
+  return { valid: errors.length === 0, servers: parsed.servers.length, errors };
+}
+
 export async function loadExternalServers(
   configPath: string,
 ): Promise<ExternalToolRegistry> {

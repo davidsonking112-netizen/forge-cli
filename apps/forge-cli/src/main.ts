@@ -11,14 +11,28 @@ import type {
 import { ForgeSupervisor } from "./supervisor.js";
 import { buildRepositoryContext } from "./context.js";
 import { FullScreenTui } from "./tui.js";
-import { AcpJsonlBridge, loadExternalServers } from "./integrations.js";
+import {
+  AcpJsonlBridge,
+  loadExternalServers,
+  validateExternalServerConfig,
+} from "./integrations.js";
 import { WorkspaceTools } from "./tools.js";
 import { McpStdioClient } from "./mcp.js";
 import { summarizeUnifiedDiff } from "./diff.js";
 import { loadPolicyPack } from "./policy.js";
 import { loadExtensionManifests } from "./extensions.js";
+import {
+  getAutonomyProfile,
+  listAutonomyProfiles,
+  type AutonomyProfileName,
+} from "./profiles.js";
+import {
+  buildRepositoryIndex,
+  clearRepositoryIndex,
+  readRepositoryIndex,
+} from "./index.js";
 
-const VERSION = "0.5.5";
+const VERSION = "0.6.0";
 
 function usage(): string {
   return `Forge CLI v${VERSION}
@@ -33,6 +47,7 @@ Usage:
   forge undo <checkpoint-id>              Restore a Forge-managed checkpoint
   forge git status|branch|stage|commit    Use approval-gated local Git workflows
   forge git prepare-pr [title]            Prepare a local review-ready PR draft
+  forge mcp validate                       Validate MCP config without launching servers
   forge mcp list|enable|disable|tools|call Use explicitly enabled MCP stdio servers
   forge review <diff-file>                Inspect a unified diff without applying it
   forge apply-diff <diff-file>            Apply a reviewed diff after approval
@@ -40,6 +55,8 @@ Usage:
   forge policy validate <file>             Validate a stricter local policy pack
   forge policy effective [file]            Show the effective safety restrictions
   forge context <prompt>                   Inspect selected context and checks
+  forge profiles                           List bounded autonomy profiles
+  forge index build|show|clear             Manage the opt-in local metadata index
   forge extensions list [dir]              Validate local extension manifests
 
 Options:
@@ -52,6 +69,7 @@ Options:
   --max-total-turns <n>  Limit total delegated provider turns (default: 8)
   --no-record            Do not persist this session locally
   --policy-pack <file>   Load a deny-only policy pack for this run
+  --profile <name>       Select a bounded autonomy profile
   --help                 Show this help
   --version              Show the version
 `;
@@ -80,6 +98,8 @@ function parseArgs(argv: string[]): ParsedArgs {
     "acp",
     "policy",
     "context",
+    "profiles",
+    "index",
     "extensions",
     "git",
     "help",
@@ -291,6 +311,7 @@ async function sessionCommand(args: ParsedArgs): Promise<number> {
       console.error("This session does not contain a resumable prompt");
       return 1;
     }
+    await supervisor.markSessionResumed(record.id);
     return runTask({
       command: "interactive",
       positional: [start.prompt],
@@ -323,9 +344,13 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
       exitCode: number | null;
     }> = [];
     let provider: string | undefined;
+    let profile: string | undefined;
     for (const event of session.events) {
       counts[event.type] = (counts[event.type] ?? 0) + 1;
-      if (event.type === "session.start") provider = event.provider;
+      if (event.type === "session.start") {
+        provider = event.provider;
+        profile = event.profile;
+      }
       if (event.type === "tool.result") {
         const metric = (toolMetrics[event.tool] ??= {
           count: 0,
@@ -360,6 +385,10 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
           createdAt: session.createdAt,
           updatedAt: session.updatedAt,
           provider,
+          profile,
+          status: session.status,
+          resumeCount: session.resumeCount,
+          plan: session.plan,
           eventCount: session.events.length,
           eventTypes: counts,
           toolMetrics,
@@ -485,6 +514,58 @@ async function gitCommand(args: ParsedArgs): Promise<number> {
   }
 }
 
+async function indexCommand(args: ParsedArgs): Promise<number> {
+  const action = args.positional[0] ?? "show";
+  const workspace = path.resolve(
+    flagString(args.flags, "workspace", process.cwd()),
+  );
+  try {
+    if (action === "build") {
+      const index = await buildRepositoryIndex(workspace);
+      console.log(
+        JSON.stringify(
+          {
+            action,
+            root: index.root,
+            files: index.files.length,
+            updatedAt: index.updatedAt,
+          },
+          null,
+          2,
+        ),
+      );
+      return 0;
+    }
+    if (action === "show") {
+      console.log(
+        JSON.stringify(await readRepositoryIndex(workspace), null, 2),
+      );
+      return 0;
+    }
+    if (action === "clear") {
+      await clearRepositoryIndex(workspace);
+      console.log(
+        JSON.stringify({ action, root: workspace, cleared: true }, null, 2),
+      );
+      return 0;
+    }
+    console.error("Usage: forge index build|show|clear [--workspace <path>]");
+    return 2;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
+async function profilesCommand(args: ParsedArgs): Promise<number> {
+  if (args.positional.length) {
+    console.error("Usage: forge profiles");
+    return 2;
+  }
+  console.log(JSON.stringify(listAutonomyProfiles(), null, 2));
+  return 0;
+}
+
 async function contextCommand(args: ParsedArgs): Promise<number> {
   const prompt = args.positional.join(" ").trim();
   if (!prompt) {
@@ -504,10 +585,11 @@ async function contextCommand(args: ParsedArgs): Promise<number> {
           packageManager: context.packageManager,
           changedFiles: context.changedFiles,
           relevantFiles: context.relevantFiles.map(
-            ({ path: filePath, bytes, symbols }) => ({
+            ({ path: filePath, bytes, symbols, reasons }) => ({
               path: filePath,
               bytes,
               symbols,
+              reasons,
             }),
           ),
           verificationCommands: context.verificationCommands,
@@ -676,6 +758,11 @@ async function mcpCommand(args: ParsedArgs): Promise<number> {
     ),
   );
   const action = args.positional[0] ?? "list";
+  if (action === "validate") {
+    const result = await validateExternalServerConfig(configPath);
+    console.log(JSON.stringify(result, null, 2));
+    return result.valid ? 0 : 1;
+  }
   if (action === "enable" || action === "disable") {
     const id = args.positional[1];
     if (!id || !input.isTTY) {
@@ -903,6 +990,10 @@ async function runTask(args: ParsedArgs): Promise<number> {
   const supervisor = new ForgeSupervisor();
   try {
     const policyPackPath = flagString(args.flags, "policy-pack");
+    const profileName = flagString(args.flags, "profile");
+    const autonomyProfile = profileName
+      ? getAutonomyProfile(profileName).name
+      : undefined;
     const policyPack = policyPackPath
       ? await loadPolicyPack(path.resolve(policyPackPath))
       : undefined;
@@ -931,6 +1022,9 @@ async function runTask(args: ParsedArgs): Promise<number> {
         : {}),
       ...(args.flags["no-record"] === true ? { record: false } : {}),
       ...(policyPack ? { policyPack } : {}),
+      ...(autonomyProfile
+        ? { autonomyProfile: autonomyProfile as AutonomyProfileName }
+        : {}),
     };
     const result = await supervisor.run(runOptions);
     return result.status === "completed" ? 0 : 1;
@@ -965,6 +1059,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (args.command === "acp") return acpCommand(args);
   if (args.command === "policy") return policyCommand(args);
   if (args.command === "context") return contextCommand(args);
+  if (args.command === "profiles") return profilesCommand(args);
+  if (args.command === "index") return indexCommand(args);
   if (args.command === "extensions") return extensionsCommand(args);
   if (args.command === "git") return gitCommand(args);
   return runTask(args);
