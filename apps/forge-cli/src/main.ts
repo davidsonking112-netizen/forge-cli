@@ -11,7 +11,7 @@ import type {
   ToolProposalEvent,
 } from "../../../packages/protocol/src/index.js";
 import { ForgeSupervisor } from "./supervisor.js";
-import type { SessionRecord } from "./sessions.js";
+import { SessionStore, type SessionRecord } from "./sessions.js";
 import {
   buildRepositoryContext,
   fingerprintRepositoryContext,
@@ -56,6 +56,7 @@ Usage:
   forge init [--workspace <path>]         Run safe first-run onboarding checks
   forge doctor [--repair]                Check runtime; print safe repair guidance
   forge providers                         List supported provider configuration paths
+  forge status [--workspace <path>]         Show compact read-only runtime status
   forge errors                            Print stable exit and error-code reference
   forge config show|path|set <key> <v>   Inspect or update local configuration
   forge prompt show|set|clear            Manage an optional user system prompt
@@ -115,6 +116,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     "init",
     "doctor",
     "providers",
+    "status",
     "errors",
     "config",
     "prompt",
@@ -285,6 +287,142 @@ function renderEvent(event: ForgeEvent, json: boolean): void {
     default:
       break;
   }
+}
+
+async function statusCommand(args: ParsedArgs): Promise<number> {
+  const workspace = path.resolve(
+    flagString(args.flags, "workspace", process.cwd()),
+  );
+  const json = flagString(args.flags, "output") === "json";
+  const workspaceStat = await fs.stat(workspace).catch(() => null);
+  if (!workspaceStat?.isDirectory()) {
+    if (json)
+      console.log(
+        JSON.stringify(
+          {
+            workspace,
+            error: {
+              code: "WORKSPACE_INVALID",
+              message:
+                "Approved workspace does not exist or is not a directory",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+    else console.error("[WORKSPACE_INVALID] Approved workspace is unavailable");
+    return 2;
+  }
+  const provider = (process.env.FORGE_PROVIDER ?? "mock").toLowerCase();
+  const providerKeys: Record<string, string[]> = {
+    openrouter: ["OPENROUTER_API_KEY"],
+    groq: ["GROQ_API_KEY"],
+    gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_STUDIO_API_KEY"],
+    google: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_STUDIO_API_KEY"],
+    "google-ai-studio": [
+      "GEMINI_API_KEY",
+      "GOOGLE_API_KEY",
+      "GOOGLE_AI_STUDIO_API_KEY",
+    ],
+    xai: ["XAI_API_KEY"],
+    openai: ["FORGE_API_KEY", "OPENAI_API_KEY"],
+    "openai-compatible": ["FORGE_API_KEY", "OPENAI_API_KEY"],
+    compatible: ["FORGE_API_KEY", "OPENAI_API_KEY"],
+  };
+  const credentialConfigured =
+    provider === "mock" ||
+    provider === "test" ||
+    (providerKeys[provider] ?? ["FORGE_API_KEY", "OPENAI_API_KEY"]).some(
+      (key) => Boolean(process.env[key]),
+    );
+  let profileName = flagString(args.flags, "profile", "local-test");
+  try {
+    profileName = getAutonomyProfile(profileName).name;
+  } catch {
+    profileName = "invalid";
+  }
+  const sessionStore = new SessionStore();
+  const sessions = (await sessionStore.list()).filter(
+    (session) => path.resolve(session.workspace) === workspace,
+  );
+  const latest = sessions[0];
+  let verificationFreshness:
+    "none" | "not-recorded" | "fresh" | "stale" | "unknown" = "none";
+  if (latest) {
+    const record = await sessionStore.read(latest.id);
+    if (!record.verification.length) verificationFreshness = "not-recorded";
+    else if (!record.workspaceFingerprint) verificationFreshness = "unknown";
+    else {
+      const context = await buildRepositoryContext(workspace, "verification");
+      verificationFreshness =
+        fingerprintRepositoryContext(context) === record.workspaceFingerprint
+          ? "fresh"
+          : "stale";
+    }
+  }
+  const mcpPath = configFilePath("integrations.json");
+  const mcpFile = await fs.lstat(mcpPath).catch(() => null);
+  const mcp = {
+    configured: Boolean(mcpFile?.isFile() && !mcpFile.isSymbolicLink()),
+    valid: false,
+    servers: 0,
+    enabledServers: 0,
+    launched: false,
+  };
+  if (mcp.configured) {
+    const validation = await validateExternalServerConfig(mcpPath);
+    mcp.valid = validation.valid;
+    mcp.servers = validation.servers;
+    if (validation.valid) {
+      const registry = await loadExternalServers(mcpPath);
+      mcp.enabledServers = registry
+        .list()
+        .filter((server) => server.enabled).length;
+    }
+  }
+  const summary = {
+    workspace,
+    provider: {
+      name: provider,
+      credentialConfigured,
+      modelConfigured: Boolean(process.env.FORGE_MODEL),
+      baseUrlConfigured: Boolean(process.env.FORGE_BASE_URL),
+    },
+    policy: {
+      mode: "safe",
+      profile: profileName,
+    },
+    session: latest
+      ? {
+          id: latest.id,
+          status: latest.status,
+          updatedAt: latest.updatedAt,
+        }
+      : null,
+    mcp,
+    verificationFreshness,
+    readOnly: true,
+  };
+  if (json) console.log(JSON.stringify(summary, null, 2));
+  else {
+    console.log("Forge status (read-only)");
+    console.log(`Workspace: ${summary.workspace}`);
+    console.log(
+      `Provider: ${summary.provider.name} (credential ${summary.provider.credentialConfigured ? "configured" : "not configured"})`,
+    );
+    console.log(
+      `Policy: ${summary.policy.mode}; profile ${summary.policy.profile}`,
+    );
+    console.log(
+      `Session: ${summary.session ? `${summary.session.id} ${summary.session.status}` : "none"}`,
+    );
+    console.log(
+      `MCP: ${summary.mcp.configured ? `${summary.mcp.servers} configured, ${summary.mcp.enabledServers} active` : "not configured"} (launched: no)`,
+    );
+    console.log(`Verification: ${summary.verificationFreshness}`);
+  }
+  return 0;
 }
 
 async function errorsCommand(args: ParsedArgs): Promise<number> {
@@ -2277,6 +2415,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (args.command === "init") return initCommand(args);
   if (args.command === "doctor") return doctor(args);
   if (args.command === "providers") return providersCommand();
+  if (args.command === "status") return statusCommand(args);
   if (args.command === "errors") return errorsCommand(args);
   if (args.command === "config") return configCommand(args);
   if (args.command === "prompt") return promptCommand(args);

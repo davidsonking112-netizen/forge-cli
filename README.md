@@ -10,7 +10,10 @@ Forge is in **v1.0 release-candidate preparation**. The v1 work adds named provi
 
 Read the [Forge Constitution](docs/FORGE_CONSTITUTION.md), [v1.0 readiness report](docs/V1.0_READINESS_REPORT.md), [model-audit notes](docs/V1.0_MODEL_AUDIT_NOTES.md), [security patch register](docs/V1.0_SECURITY_AUDIT_NOTES.md), and [exit/error-code reference](docs/ERROR_CODES.md) for the governing principles, remaining recommendations, model-attributed findings, implemented patches, automation contract, and evidence limitations.
 
-For scripts and CI, run `forge errors` for the versioned machine-readable contract. Exit code `0` means success, `1` means an attempted operation failed, `2` means usage or safety preconditions blocked execution, and `130` means the operator cancelled a run with Ctrl-C. Forge aborts active worker, subprocess, MCP, and Daytona boundaries where supported; it does not replay pending mutations. Do not parse human-readable messages as a stable API.
+Use `forge status` for a compact read-only summary of the current workspace, provider configuration state, safe policy/profile, latest session, MCP configuration, and verification freshness. Use `forge status --output json` for scripts and CI; it never prints credential values or launches external actions.
+
+For scripts and CI, run `forge errors` for the versioned machine-readable contract.
+Exit code `0` means success, `1` means an attempted operation failed, `2` means usage or safety preconditions blocked execution, and `130` means the operator cancelled a run with Ctrl-C. Forge aborts active worker, subprocess, MCP, and Daytona boundaries where supported; it does not replay pending mutations. Do not parse human-readable messages as a stable API.
 
 ## Development requirements
 

@@ -858,6 +858,47 @@ test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MC
   }
 });
 
+test("forge status summarizes safe local state without secrets", async () => {
+  const root = await fixture();
+  const state = await mkdtemp(path.join(os.tmpdir(), "forge-status-state-"));
+  try {
+    const cli = path.resolve("dist/apps/forge-cli/src/main.js");
+    const env = {
+      ...process.env,
+      FORGE_PROVIDER: "mock",
+      OPENAI_API_KEY: "status-secret-must-not-appear",
+      XDG_STATE_HOME: state,
+    };
+    const result = spawnSync(
+      process.execPath,
+      [cli, "status", `--workspace=${root}`, "--output=json"],
+      { cwd: process.cwd(), encoding: "utf8", env },
+    );
+    assert.equal(result.status, 0);
+    const status = JSON.parse(result.stdout);
+    assert.equal(status.readOnly, true);
+    assert.equal(status.workspace, root);
+    assert.equal(status.provider.name, "mock");
+    assert.equal(status.provider.credentialConfigured, true);
+    assert.equal(status.policy.mode, "safe");
+    assert.equal(status.policy.profile, "local-test");
+    assert.equal(status.session, null);
+    assert.equal(status.mcp.launched, false);
+    assert.equal(status.verificationFreshness, "none");
+    assert.doesNotMatch(result.stdout, /status-secret-must-not-appear/);
+    const invalid = spawnSync(
+      process.execPath,
+      [cli, "status", `--workspace=${path.join(root, "missing")}`],
+      { cwd: process.cwd(), encoding: "utf8", env },
+    );
+    assert.equal(invalid.status, 2);
+    assert.match(invalid.stderr, /WORKSPACE_INVALID/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(state, { recursive: true, force: true });
+  }
+});
+
 test("forge errors exposes the stable automation contract", async () => {
   const cli = path.resolve("dist/apps/forge-cli/src/main.js");
   const result = spawnSync(process.execPath, [cli, "errors"], {
