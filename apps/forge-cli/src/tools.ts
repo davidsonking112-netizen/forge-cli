@@ -37,6 +37,20 @@ const ignoredDirectories = new Set([
   "__pycache__",
 ]);
 
+function boundedInt(
+  value: unknown,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const parsed =
+    typeof value === "number" || typeof value === "string"
+      ? Number(value)
+      : NaN;
+  if (!Number.isSafeInteger(parsed)) return fallback;
+  return Math.max(minimum, Math.min(maximum, parsed));
+}
+
 const sensitiveNames = [
   ".env",
   ".env.local",
@@ -322,7 +336,7 @@ export class WorkspaceTools {
   private async list(
     args: Record<string, unknown>,
   ): Promise<Array<{ path: string; bytes: number; sha256: string }>> {
-    const limit = Math.min(Math.max(Number(args.limit ?? 120), 1), 500);
+    const limit = boundedInt(args.limit ?? 120, 120, 1, 500);
     const files: Array<{ path: string; bytes: number; sha256: string }> = [];
     const visit = async (directory: string): Promise<void> => {
       if (files.length >= limit) return;
@@ -356,7 +370,7 @@ export class WorkspaceTools {
   ): Promise<Array<{ path: string; line: number; text: string }>> {
     const query = String(args.query ?? "");
     if (!query) throw new Error("Search query is required");
-    const limit = Math.min(Math.max(Number(args.limit ?? 80), 1), 300);
+    const limit = boundedInt(args.limit ?? 80, 80, 1, 300);
     const results: Array<{ path: string; line: number; text: string }> = [];
     const files = await this.list({ limit: 500 });
     for (const file of files) {
@@ -385,10 +399,7 @@ export class WorkspaceTools {
   ): Promise<{ path: string; content: string; bytes: number; sha256: string }> {
     const relativePath = String(args.path ?? "");
     const target = this.resolveSafe(relativePath);
-    const maxBytes = Math.min(
-      Math.max(Number(args.maxBytes ?? 20_000), 100),
-      200_000,
-    );
+    const maxBytes = boundedInt(args.maxBytes ?? 20_000, 20_000, 100, 200_000);
     const buffer = await fs.readFile(target);
     if (buffer.includes(0))
       throw new Error("Binary files are not readable through the text tool");
@@ -542,7 +553,13 @@ export class WorkspaceTools {
     }> = [];
     await fs.mkdir(this.checkpointRoot, { recursive: true, mode: 0o700 });
     for (const [index, change] of changes.entries()) {
-      const previous = await fs.readFile(change.target).catch(() => null);
+      let previous: Buffer | null;
+      try {
+        previous = await fs.readFile(change.target);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        previous = null;
+      }
       const beforeSha256 = previous
         ? createHash("sha256").update(previous).digest("hex")
         : null;
@@ -614,12 +631,16 @@ export class WorkspaceTools {
     const command = String(args.command ?? "");
     if (!command) throw new Error("Command is required");
     const commandArgs = Array.isArray(args.args) ? args.args.map(String) : [];
-    const timeoutMs = Math.min(
-      Math.max(Number(args.timeoutMs ?? 30_000), 100),
+    const timeoutMs = boundedInt(
+      args.timeoutMs ?? 30_000,
+      30_000,
+      100,
       120_000,
     );
-    const maxOutputBytes = Math.min(
-      Math.max(Number(args.maxOutputBytes ?? 100_000), 1_000),
+    const maxOutputBytes = boundedInt(
+      args.maxOutputBytes ?? 100_000,
+      100_000,
+      1_000,
       1_000_000,
     );
     const shell = args.shell === true;

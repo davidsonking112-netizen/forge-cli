@@ -32,7 +32,7 @@ import {
   readRepositoryIndex,
 } from "./index.js";
 
-const VERSION = "0.6.0";
+const VERSION = "0.6.1";
 
 function usage(): string {
   return `Forge CLI v${VERSION}
@@ -136,7 +136,7 @@ function flagString(
   return typeof value === "string" ? value : fallback;
 }
 
-function boundedFlagInt(
+export function boundedFlagInt(
   flags: Record<string, string | boolean>,
   key: string,
   fallback: number,
@@ -144,7 +144,7 @@ function boundedFlagInt(
   maximum: number,
 ): number {
   const raw = flags[key];
-  if (typeof raw !== "string" || !/^\\d+$/.test(raw)) return fallback;
+  if (typeof raw !== "string" || !/^\d+$/.test(raw)) return fallback;
   const value = Number(raw);
   return Number.isSafeInteger(value)
     ? Math.max(minimum, Math.min(maximum, value))

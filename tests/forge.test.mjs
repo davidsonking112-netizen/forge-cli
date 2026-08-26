@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   mkdir,
   mkdtemp,
@@ -15,9 +16,14 @@ import {
   AcpBridge,
   AcpJsonlBridge,
   ExternalToolRegistry,
+  validateExternalServerConfig,
 } from "../dist/apps/forge-cli/src/integrations.js";
 import { loadExtensionManifests } from "../dist/apps/forge-cli/src/extensions.js";
+import { McpStdioClient } from "../dist/apps/forge-cli/src/mcp.js";
 import { ForgeSupervisor } from "../dist/apps/forge-cli/src/supervisor.js";
+import { SessionStore } from "../dist/apps/forge-cli/src/sessions.js";
+import { boundedFlagInt } from "../dist/apps/forge-cli/src/main.js";
+import { createEnvelope } from "../dist/packages/protocol/src/index.js";
 import {
   PolicyEngine,
   WorkspaceTools,
@@ -233,6 +239,224 @@ test("workspace tools contain paths, deny secrets, patch files, and run bounded 
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("MCP client bounds untrusted child output and drains stderr", async () => {
+  const script =
+    "process.stderr.write('x'.repeat(2000000)); process.stdout.write('x'.repeat(1000001));";
+  const client = new McpStdioClient(
+    {
+      id: "output-limit",
+      command: process.execPath,
+      args: ["-e", script],
+      enabled: true,
+      explicitConsent: true,
+      trust: "untrusted",
+      defaultRisk: "network",
+    },
+    3000,
+  );
+  try {
+    await assert.rejects(client.start(), /response exceeds|exited|timed out/i);
+  } finally {
+    client.close();
+  }
+});
+
+test("worker imports remain isolated from the workspace Python tree", async () => {
+  const directory = await tempWorkspace();
+  const state = await mkdtemp(path.join(os.tmpdir(), "forge-worker-state-"));
+  try {
+    await mkdir(path.join(directory, "python", "forge_agent"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(directory, "python", "forge_agent", "worker.py"),
+      'from pathlib import Path; Path("hijack-marker").write_text("unexpected", encoding="utf-8")\n',
+    );
+    const cli = path.resolve("dist/apps/forge-cli/src/main.js");
+    const result = spawnSync(process.execPath, [cli, "doctor"], {
+      cwd: directory,
+      encoding: "utf8",
+      env: { ...process.env, XDG_STATE_HOME: state },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    await assert.rejects(readFile(path.join(directory, "hijack-marker")));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(state, { recursive: true, force: true });
+  }
+});
+
+test("CLI startup failures are bounded for invalid workspaces and interpreters", async () => {
+  const directory = await tempWorkspace();
+  const state = await mkdtemp(path.join(os.tmpdir(), "forge-startup-state-"));
+  try {
+    const cli = path.resolve("dist/apps/forge-cli/src/main.js");
+    const missing = spawnSync(
+      process.execPath,
+      [cli, "plan", "inspect", "--workspace", path.join(directory, "missing")],
+      { encoding: "utf8", timeout: 5000 },
+    );
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /workspace does not exist/i);
+    assert.doesNotMatch(missing.stderr, /Unhandled 'error' event/);
+    const interpreter = spawnSync(
+      process.execPath,
+      [cli, "plan", "inspect", "--workspace", directory],
+      {
+        encoding: "utf8",
+        timeout: 5000,
+        env: {
+          ...process.env,
+          XDG_STATE_HOME: state,
+          FORGE_PYTHON: "forge-python-does-not-exist",
+        },
+      },
+    );
+    assert.equal(interpreter.status, 1);
+    assert.match(
+      interpreter.stderr,
+      /spawn forge-python-does-not-exist ENOENT/,
+    );
+    assert.doesNotMatch(interpreter.stderr, /Unhandled 'error' event/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(state, { recursive: true, force: true });
+  }
+});
+
+test("session records reject traversal and redact process argument secrets", async () => {
+  const state = await mkdtemp(path.join(os.tmpdir(), "forge-session-audit-"));
+  try {
+    const store = new SessionStore(state);
+    const record = await store.create("/tmp/fixture");
+    await store.append(record, {
+      ...createEnvelope("tool.proposal", record.id),
+      type: "tool.proposal",
+      tool: "process.run",
+      risk: "local-execution",
+      arguments: {
+        command: "curl",
+        args: ["-H", "Authorization: Bearer sk-secret-token", "apiKey=abc123"],
+      },
+      reason: "audit",
+    });
+    const saved = JSON.stringify(await store.read(record.id));
+    assert.doesNotMatch(saved, /sk-secret-token|abc123/);
+    assert.match(saved, /REDACTED/);
+    await assert.rejects(store.remove("../../outside"), /Invalid session ID/);
+  } finally {
+    await rm(state, { recursive: true, force: true });
+  }
+});
+
+test("MCP validator rejects actual NUL characters without launching servers", async () => {
+  const state = await mkdtemp(path.join(os.tmpdir(), "forge-mcp-audit-"));
+  try {
+    const config = path.join(state, "integrations.json");
+    await writeFile(
+      config,
+      JSON.stringify({
+        servers: [
+          {
+            id: "unsafe",
+            command: "node" + String.fromCharCode(0) + "bad",
+            args: [],
+          },
+        ],
+      }),
+    );
+    const result = await validateExternalServerConfig(config);
+    assert.equal(result.valid, false);
+    assert.match(result.errors.join(" "), /command is invalid/);
+    await writeFile(config, "[]");
+    const arrayRoot = await validateExternalServerConfig(config);
+    assert.equal(arrayRoot.valid, false);
+    assert.match(arrayRoot.errors.join(" "), /root must be an object/);
+    await writeFile(config, JSON.stringify({ servers: {} }));
+    const objectServers = await validateExternalServerConfig(config);
+    assert.equal(objectServers.valid, false);
+    assert.match(objectServers.errors.join(" "), /servers must be an array/);
+  } finally {
+    await rm(state, { recursive: true, force: true });
+  }
+});
+
+test("unified diffs honor trailing-newline markers", async () => {
+  const directory = await tempWorkspace();
+  try {
+    const tools = new WorkspaceTools(directory);
+    const addNewline = [
+      "diff --git a/no-newline.txt b/no-newline.txt",
+      "--- a/no-newline.txt",
+      "+++ b/no-newline.txt",
+      "@@ -1 +1 @@",
+      "-hello",
+      "\\ No newline at end of file",
+      "+hello",
+      "",
+    ].join("\n");
+    await writeFile(path.join(directory, "no-newline.txt"), "hello");
+    const first = await tools.execute({
+      tool: "workspace.apply_unified_diff",
+      arguments: { diff: addNewline },
+    });
+    assert.equal(first.ok, true);
+    assert.equal(
+      await readFile(path.join(directory, "no-newline.txt"), "utf8"),
+      "hello\n",
+    );
+    const removeNewline = [
+      "diff --git a/no-newline.txt b/no-newline.txt",
+      "--- a/no-newline.txt",
+      "+++ b/no-newline.txt",
+      "@@ -1 +1 @@",
+      "-hello",
+      "+hello",
+      "\\ No newline at end of file",
+      "",
+    ].join("\n");
+    const second = await tools.execute({
+      tool: "workspace.apply_unified_diff",
+      arguments: { diff: removeNewline },
+    });
+    assert.equal(second.ok, true);
+    assert.equal(
+      await readFile(path.join(directory, "no-newline.txt"), "utf8"),
+      "hello",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("workspace listing retains bounds for malformed numeric arguments", async () => {
+  const directory = await tempWorkspace();
+  try {
+    await mkdir(path.join(directory, "many"));
+    await Promise.all(
+      Array.from({ length: 150 }, (_, index) =>
+        writeFile(path.join(directory, "many", `${index}.txt`), "x"),
+      ),
+    );
+    const result = await new WorkspaceTools(directory).execute({
+      tool: "workspace.list",
+      arguments: { limit: "not-a-number" },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.output.length, 120);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("CLI numeric bounds parse, clamp, and reject malformed values", () => {
+  const flags = { "max-agents": "2", "max-total-turns": "99" };
+  assert.equal(boundedFlagInt(flags, "max-agents", 4, 1, 4), 2);
+  assert.equal(boundedFlagInt(flags, "max-total-turns", 8, 1, 16), 16);
+  assert.equal(boundedFlagInt({ value: "\\\\d" }, "value", 7, 1, 10), 7);
+  assert.equal(boundedFlagInt({ value: "oops" }, "value", 7, 1, 10), 7);
 });
 
 test("Git workflow tools validate mutation inputs", async () => {

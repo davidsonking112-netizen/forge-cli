@@ -1,7 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
+import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   createEnvelope,
   encodeForgeEvent,
@@ -52,6 +54,11 @@ export class ForgeSupervisor {
 
   public async run(options: RunOptions): Promise<RunResult> {
     const workspace = path.resolve(options.workspace);
+    const workspaceStat = await fs.stat(workspace).catch(() => null);
+    if (!workspaceStat?.isDirectory())
+      throw new Error(
+        "Approved workspace does not exist or is not a directory",
+      );
     const timestamp = new Date().toISOString();
     const session: SessionRecord =
       options.record === false
@@ -87,15 +94,23 @@ export class ForgeSupervisor {
         : {}),
     });
     const tools = new WorkspaceTools(workspace);
-    const worker = this.startWorker(options);
     const repositoryContext = await buildRepositoryContext(
       workspace,
       options.prompt,
     );
+    const worker = this.startWorker(options);
+    let workerError: Error | undefined;
+    worker.on("error", (error) => {
+      workerError = error instanceof Error ? error : new Error(String(error));
+    });
+    worker.stdin.on("error", (error) => {
+      workerError = error instanceof Error ? error : new Error(String(error));
+    });
     let sessionResult: RunResult | undefined;
     let approvalMode: "safe" | "session-approve" | "unsafe" = policy.mode;
 
     const send = (event: ForgeEvent): void => {
+      if (workerError) throw workerError;
       worker.stdin.write(`${encodeForgeEvent(event)}\n`);
     };
 
@@ -231,7 +246,9 @@ export class ForgeSupervisor {
       sessionResult = {
         sessionId: session.id,
         status: "failed",
-        summary: "The worker exited before completing the session.",
+        summary: workerError
+          ? `The worker failed: ${workerError.message}`
+          : "The worker exited before completing the session.",
         changedFiles: [],
       };
     }
@@ -264,12 +281,39 @@ export class ForgeSupervisor {
     const python =
       process.env.FORGE_PYTHON ??
       (process.platform === "win32" ? "python" : "python3");
-    const pythonRoot = path.resolve(process.cwd(), "python");
-    const env = {
-      ...process.env,
-      PYTHONPATH: [pythonRoot, process.env.PYTHONPATH]
-        .filter(Boolean)
-        .join(path.delimiter),
+    const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
+    const pythonRoot = path.resolve(moduleDirectory, "../../../../python");
+    const inherited = process.env;
+    const env: NodeJS.ProcessEnv = {
+      PATH: inherited.PATH,
+      PYTHONPATH: pythonRoot,
+      ...(process.platform === "win32" && inherited.SystemRoot
+        ? { SystemRoot: inherited.SystemRoot }
+        : {}),
+      ...(inherited.HOME ? { HOME: inherited.HOME } : {}),
+      ...(inherited.TMPDIR ? { TMPDIR: inherited.TMPDIR } : {}),
+      ...(inherited.TEMP ? { TEMP: inherited.TEMP } : {}),
+      ...(inherited.TMP ? { TMP: inherited.TMP } : {}),
+      ...Object.fromEntries(
+        [
+          "FORGE_PROVIDER",
+          "FORGE_API_KEY",
+          "OPENAI_API_KEY",
+          "FORGE_BASE_URL",
+          "FORGE_MODEL",
+          "FORGE_MAX_TOKENS",
+          "FORGE_REASONING_EFFORT",
+          "FORGE_PROVIDER_RETRIES",
+          "HTTP_PROXY",
+          "HTTPS_PROXY",
+          "NO_PROXY",
+          "http_proxy",
+          "https_proxy",
+          "no_proxy",
+        ]
+          .filter((key) => inherited[key] !== undefined)
+          .map((key) => [key, inherited[key]]),
+      ),
       ...(options.multiAgent === undefined
         ? {}
         : { FORGE_MULTI_AGENT: options.multiAgent ? "1" : "0" }),
@@ -281,7 +325,7 @@ export class ForgeSupervisor {
         : { FORGE_MAX_TOTAL_TURNS: String(options.maxTotalTurns) }),
     };
     return spawn(python, ["-m", "forge_agent.worker"], {
-      cwd: process.cwd(),
+      cwd: path.resolve(options.workspace),
       env,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,

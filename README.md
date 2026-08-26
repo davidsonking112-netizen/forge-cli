@@ -6,7 +6,7 @@ The TypeScript/Node.js supervisor owns the command-line interface, terminal even
 
 ## Status
 
-Forge v0.6.0 adds bounded repository intelligence, explainable context selection, metadata-only local indexing, resumable session lifecycle state, evidence-based verification results, and named autonomy profiles while retaining the local-first safety model.
+Forge v0.6.1 is the v0.6 audit patch. It retains bounded repository intelligence, explainable context selection, metadata-only local indexing, resumable session lifecycle state, evidence-based verification results, and named autonomy profiles while strengthening worker isolation, session persistence, MCP validation, and resource bounds.
 
 ## Development requirements
 

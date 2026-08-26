@@ -4,6 +4,7 @@ export interface UnifiedHunk {
   newStart: number;
   newCount: number;
   lines: string[];
+  noNewlineAtEnd?: "old" | "new" | "both";
 }
 
 export interface UnifiedFilePatch {
@@ -156,13 +157,20 @@ export function parseUnifiedDiff(diff: string): UnifiedFilePatch[] {
       ) {
         const hunkLine = lines[index];
         if (hunkLine === undefined || hunkLine === "") break;
-        if (
-          hunkLine !== "\\ No newline at end of file" &&
-          !/^[ +\-]/.test(hunkLine)
-        )
+        if (hunkLine === "\\ No newline at end of file") {
+          const previous = hunk.lines.at(-1);
+          if (!previous)
+            throw new Error("Malformed unified diff newline marker");
+          const side =
+            previous[0] === "-" ? "old" : previous[0] === "+" ? "new" : "both";
+          hunk.noNewlineAtEnd =
+            hunk.noNewlineAtEnd && hunk.noNewlineAtEnd !== side ? "both" : side;
+          index += 1;
+          continue;
+        }
+        if (!/^[ +\-]/.test(hunkLine))
           throw new Error("Malformed unified diff hunk line");
-        if (hunkLine !== "\\ No newline at end of file")
-          hunk.lines.push(hunkLine);
+        hunk.lines.push(hunkLine);
         index += 1;
       }
       const oldLines = hunk.lines.filter((entry) => entry[0] !== "+").length;
@@ -240,7 +248,17 @@ export function applyUnifiedFilePatch(
     }
   }
   result.push(...source.lines.slice(cursor));
-  return result.join("\n") + (source.trailingNewline ? "\n" : "");
+  const finalHunk = patch.hunks.at(-1);
+  const noNewline = finalHunk?.noNewlineAtEnd;
+  const trailingNewline =
+    noNewline === "new" || noNewline === "both"
+      ? false
+      : noNewline === "old"
+        ? (finalHunk?.newCount ?? 0) > 0
+        : cursor === source.lines.length
+          ? true
+          : source.trailingNewline;
+  return result.join("\n") + (trailingNewline ? "\n" : "");
 }
 
 export function summarizeUnifiedDiff(diff: string): UnifiedDiffSummary {

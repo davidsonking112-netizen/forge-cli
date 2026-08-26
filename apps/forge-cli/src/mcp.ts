@@ -1,5 +1,4 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import type { ExternalServer } from "./integrations.js";
 
@@ -50,6 +49,7 @@ export class McpStdioClient {
   >();
   private nextId = 0;
   private closed = false;
+  private stdoutBuffer = "";
 
   public constructor(
     private readonly server: ExternalServer,
@@ -66,16 +66,19 @@ export class McpStdioClient {
       env: childEnvironment(),
       windowsHide: true,
     });
-    const lines = createInterface({ input: this.process.stdout });
-    lines.on("line", (line) => this.handleLine(line));
+    this.stdoutBuffer = "";
+    this.process.stdout.setEncoding("utf8");
+    this.process.stdout.on("data", (chunk: string) => this.handleStdout(chunk));
+    this.process.stderr.resume();
     this.process.on("error", (error) => this.rejectAll(error));
+    this.process.stdin.on("error", (error) => this.rejectAll(error));
     this.process.on("close", (code) =>
       this.rejectAll(new Error(`MCP server exited with code ${code ?? 1}`)),
     );
     await this.request("initialize", {
       protocolVersion: "2025-06-18",
       capabilities: {},
-      clientInfo: { name: "forge-cli", version: "0.6.0" },
+      clientInfo: { name: "forge-cli", version: "0.6.1" },
     });
     this.notify("notifications/initialized", {});
   }
@@ -148,6 +151,25 @@ export class McpStdioClient {
       }, this.timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
     });
+  }
+
+  private handleStdout(chunk: string): void {
+    if (this.closed) return;
+    this.stdoutBuffer += chunk;
+    if (Buffer.byteLength(this.stdoutBuffer, "utf8") > 1_000_000) {
+      this.stdoutBuffer = "";
+      this.closed = true;
+      this.rejectAll(new Error("MCP response exceeds the 1000000-byte limit"));
+      this.process?.kill("SIGTERM");
+      return;
+    }
+    let newline = this.stdoutBuffer.indexOf("\n");
+    while (newline >= 0) {
+      const line = this.stdoutBuffer.slice(0, newline).replace(/\r$/, "");
+      this.stdoutBuffer = this.stdoutBuffer.slice(newline + 1);
+      this.handleLine(line);
+      newline = this.stdoutBuffer.indexOf("\n");
+    }
   }
 
   private handleLine(line: string): void {

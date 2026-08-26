@@ -54,17 +54,24 @@ export class SessionStore {
   }
 
   public async save(record: SessionRecord): Promise<void> {
+    if (!/^[0-9a-f-]{36}$/i.test(record.id))
+      throw new Error("Invalid session ID");
     await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
     const sanitized = JSON.stringify(
       { ...record, events: record.events.slice(-500) },
       null,
       2,
     );
-    await fs.writeFile(
-      path.join(this.directory, `${record.id}.json`),
-      sanitized,
-      { encoding: "utf8", mode: 0o600 },
-    );
+    const target = path.join(this.directory, `${record.id}.json`);
+    const temporary = `${target}.${randomUUID()}.tmp`;
+    await fs.writeFile(temporary, sanitized, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    await fs.rename(temporary, target).catch(async (error) => {
+      await fs.unlink(temporary).catch(() => undefined);
+      throw error;
+    });
   }
 
   public async append(record: SessionRecord, event: ForgeEvent): Promise<void> {
@@ -163,6 +170,7 @@ export class SessionStore {
   }
 
   public async remove(id: string): Promise<void> {
+    if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("Invalid session ID");
     await fs.unlink(path.join(this.directory, `${id}.json`));
   }
 
@@ -172,14 +180,28 @@ export class SessionStore {
 
   private sanitizeEvent(event: ForgeEvent): ForgeEvent {
     const copy = structuredClone(event) as ForgeEvent;
-    if (copy.type === "tool.proposal" && copy.tool === "process.run") {
-      const args = copy.arguments;
-      if (typeof args.command === "string")
-        args.command = args.command.replace(
-          /(api[_-]?key|token|password|secret)=\S+/gi,
-          "$1=[REDACTED]",
-        );
-    }
+    if (copy.type === "tool.proposal" && copy.tool === "process.run")
+      copy.arguments = redactValue(copy.arguments) as Record<string, unknown>;
     return copy;
   }
+}
+
+function redactValue(value: unknown): unknown {
+  if (typeof value === "string")
+    return value.replace(
+      /(api[_-]?key|token|password|secret)\s*[:=]\s*\S+|bearer\s+[A-Za-z0-9._~+/=-]+|sk-[A-Za-z0-9_-]{8,}/gi,
+      (match) => {
+        const separator = match.match(/\s*[:=]\s*/)?.[0];
+        if (separator)
+          return `${match.slice(0, match.indexOf(separator))}${separator}[REDACTED]`;
+        if (/^bearer\s/i.test(match)) return "Bearer [REDACTED]";
+        return "sk-[REDACTED]";
+      },
+    );
+  if (Array.isArray(value)) return value.map(redactValue);
+  if (value && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, redactValue(entry)]),
+    );
+  return value;
 }

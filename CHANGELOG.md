@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1 — 2026-08-26
+
+The v0.6 audit patch isolates the Python worker from workspace-controlled module paths, validates workspace startup before spawning, reports unavailable interpreters without uncaught child-process errors, rejects session-ID traversal, writes session records atomically, and redacts secrets in process arguments as well as commands.
+
+The patch also fixes numeric bound parsing, rejects malformed MCP configuration roots and NUL-containing commands, bounds MCP stdout while draining stderr, honors unified-diff trailing-newline markers, and adds regression coverage for these cases. The global safety ceiling, supervisor authority, approval gates, and local-first defaults are unchanged.
+
 ## 0.6.0 — 2026-08-26
 
 Forge v0.6 adds bounded repository intelligence with explainable context-selection reasons and an explicit local metadata-only repository index. Index files contain paths, sizes, and bounded symbols rather than file contents, and are stored under Forge local state only when the user requests `forge index build`.

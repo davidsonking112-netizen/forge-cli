@@ -160,9 +160,9 @@ export async function validateExternalServerConfig(
       servers: 0,
       errors: ["MCP configuration exceeds the 100000-byte limit"],
     };
-  let parsed: { servers?: unknown };
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(content) as { servers?: unknown };
+    parsed = JSON.parse(content);
   } catch {
     return {
       valid: false,
@@ -170,10 +170,23 @@ export async function validateExternalServerConfig(
       errors: ["MCP configuration is not valid JSON"],
     };
   }
-  if (!Array.isArray(parsed.servers))
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    return {
+      valid: false,
+      servers: 0,
+      errors: ["MCP configuration root must be an object"],
+    };
+  const root = parsed as { servers?: unknown };
+  if (root.servers === undefined)
     return { valid: true, servers: 0, errors: [] };
+  if (!Array.isArray(root.servers))
+    return {
+      valid: false,
+      servers: 0,
+      errors: ["MCP configuration servers must be an array"],
+    };
   const seen = new Set<string>();
-  parsed.servers.forEach((value, index) => {
+  root.servers.forEach((value, index) => {
     if (!value || typeof value !== "object") {
       errors.push(`servers[${index}] must be an object`);
       return;
@@ -187,7 +200,7 @@ export async function validateExternalServerConfig(
     if (
       typeof item.command !== "string" ||
       !item.command ||
-      item.command.includes("\\0")
+      item.command.includes("\0")
     )
       errors.push(`servers[${index}].command is invalid`);
     if (
@@ -204,7 +217,7 @@ export async function validateExternalServerConfig(
     )
       errors.push(`servers[${index}].explicitConsent must be boolean`);
   });
-  return { valid: errors.length === 0, servers: parsed.servers.length, errors };
+  return { valid: errors.length === 0, servers: root.servers.length, errors };
 }
 
 export async function loadExternalServers(
