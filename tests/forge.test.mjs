@@ -26,7 +26,10 @@ import { prepareGitHubAction } from "../dist/apps/forge-cli/src/github.js";
 import { McpStdioClient } from "../dist/apps/forge-cli/src/mcp.js";
 import { ForgeSupervisor } from "../dist/apps/forge-cli/src/supervisor.js";
 import { SessionStore } from "../dist/apps/forge-cli/src/sessions.js";
-import { boundedFlagInt } from "../dist/apps/forge-cli/src/main.js";
+import {
+  boundedFlagInt,
+  isDirectInvocation,
+} from "../dist/apps/forge-cli/src/main.js";
 import { DaytonaClient } from "../dist/apps/forge-cli/src/daytona.js";
 import {
   createEnvelope,
@@ -920,6 +923,27 @@ test("workspace listing retains bounds for malformed numeric arguments", async (
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("direct CLI entrypoint detection handles Windows paths", () => {
+  assert.equal(
+    isDirectInvocation(
+      "file:///C:/Users/Keji/Downloads/forge-cli-main/dist/main.js",
+      "C:\\Users\\Keji\\Downloads\\forge-cli-main\\dist\\main.js",
+    ),
+    true,
+  );
+  assert.equal(
+    isDirectInvocation(
+      "file:///C:/Users/Keji/Downloads/forge-cli-main/dist/main.js",
+      "C:\\Users\\Keji\\Downloads\\forge-cli-main\\dist\\other.js",
+    ),
+    false,
+  );
+  assert.equal(
+    isDirectInvocation("file:///tmp/forge/main.js", undefined),
+    false,
+  );
 });
 
 test("CLI numeric bounds parse, clamp, and reject malformed values", () => {

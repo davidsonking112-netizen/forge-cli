@@ -4,6 +4,7 @@ import { constants as fsConstants, promises as fs } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import type {
@@ -2442,7 +2443,26 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   return runTask(args);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+export function isDirectInvocation(
+  moduleUrl: string,
+  argvPath: string | undefined,
+): boolean {
+  if (!argvPath) return false;
+  let modulePath: string;
+  try {
+    modulePath = fileURLToPath(moduleUrl);
+  } catch {
+    return false;
+  }
+  const normalize = (value: string): string => {
+    const normalized = path.posix.normalize(value.replaceAll("\\", "/"));
+    const drivePath = normalized.replace(/^\/([A-Za-z]:\/)/, "$1");
+    return /^[A-Za-z]:\//.test(drivePath) ? drivePath.toLowerCase() : drivePath;
+  };
+  return normalize(modulePath) === normalize(argvPath);
+}
+
+if (isDirectInvocation(import.meta.url, process.argv[1])) {
   main()
     .then((code) => (process.exitCode = code))
     .catch((error) => {
