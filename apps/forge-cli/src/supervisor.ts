@@ -26,7 +26,7 @@ import {
 import type { PolicyPack } from "./policy.js";
 import { getAutonomyProfile, type AutonomyProfileName } from "./profiles.js";
 
-const FORGE_VERSION = "0.9.7";
+const FORGE_VERSION = "0.9.9";
 
 export interface RunOptions {
   prompt: string;
@@ -38,6 +38,7 @@ export interface RunOptions {
   maxAgents?: number;
   maxTotalTurns?: number;
   costProfile?: "economy" | "balanced" | "quality";
+  systemPrompt?: string;
   record?: boolean;
   policyPack?: PolicyPack;
   autonomyProfile?: AutonomyProfileName;
@@ -400,6 +401,9 @@ export class ForgeSupervisor {
       ...(options.costProfile === undefined
         ? {}
         : { FORGE_COST_PROFILE: options.costProfile }),
+      ...(options.systemPrompt === undefined
+        ? {}
+        : { FORGE_SYSTEM_PROMPT: options.systemPrompt.slice(0, 20_000) }),
     };
     return spawn(python, ["-m", "forge_agent.worker"], {
       cwd: path.resolve(options.workspace),

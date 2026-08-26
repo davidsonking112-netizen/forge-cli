@@ -8,12 +8,26 @@ from contextlib import redirect_stdout
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from forge_agent.horizon import LongHorizonBuffer
 from forge_agent.orchestration import BoundedOrchestrator
-from forge_agent.providers import MockProvider, OpenAICompatibleProvider, ProviderReply, build_provider, redact
+from forge_agent.providers import MockProvider, OpenAICompatibleProvider, ProviderReply, ToolCall, build_provider, redact
 from forge_agent.worker import MockAgent, main, redact_error, selected_roles, verification_check
 
 
 class WorkerTests(unittest.TestCase):
+    def test_long_horizon_buffer_compacts_without_dropping_anchors(self):
+        buffer = LongHorizonBuffer(max_chars=1_000, max_messages=8, recent_messages=2)
+        buffer.append({"role": "system", "content": "system anchor"})
+        buffer.append({"role": "user", "content": "task anchor"})
+        for index in range(12):
+            buffer.append({"role": "tool", "content": f"evidence-{index} " * 20})
+        snapshot = buffer.snapshot()
+        self.assertLessEqual(buffer._size(snapshot), 1_000)
+        self.assertEqual(snapshot[0]["content"], "system anchor")
+        self.assertEqual(snapshot[1]["content"], "task anchor")
+        self.assertGreater(buffer.compactions, 0)
+        self.assertIn("Earlier bounded conversation", buffer.summary)
+
     def test_mock_worker_emits_plan_and_completion(self):
         messages = [
             {
@@ -120,6 +134,35 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(provider.tools, [])
         self.assertIn("evidence", provider.messages[1]["content"].lower())
         self.assertIn("approval", provider.messages[0]["content"].lower())
+
+    def test_repair_attempts_escalate_and_exhaust_at_four(self):
+        class RepairProvider:
+            def complete(self, *, messages, tools, on_text=None):
+                del messages, tools, on_text
+                return ProviderReply(tool_calls=(ToolCall("repair", "process.run", {"command": "false"}),))
+
+        agent = MockAgent("repair")
+        agent.provider = RepairProvider()
+        agent.pending_call = ToolCall("initial", "process.run", {"command": "false"})
+        agent.repair_attempts = 1
+        agent.pending_assistant_message = {"role": "assistant", "tool_calls": []}
+        all_events = []
+        for _ in range(4):
+            all_events.extend(agent.on_provider_tool_result({
+                "tool": "process.run",
+                "ok": False,
+                "approved": True,
+                "error": {"code": "COMMAND_FAILED", "message": "failed", "retryable": True},
+                "output": {"command": "false", "exitCode": 1, "output": ""},
+            }))
+            if any(item.get("type") == "session.complete" for item in all_events):
+                break
+        repairs = [item for item in all_events if item.get("type") == "agent.repair"]
+        self.assertEqual([item["attempt"] for item in repairs if item["status"] == "started"], [2, 3, 4])
+        self.assertIn("deep-thinking", [item["strategy"] for item in repairs])
+        self.assertEqual(repairs[-1]["status"], "exhausted")
+        self.assertEqual(all_events[-1]["type"], "session.complete")
+        self.assertEqual(all_events[-1]["status"], "failed")
 
     def test_failed_verification_reports_actual_evidence(self):
         agent = MockAgent("verification")

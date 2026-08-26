@@ -28,6 +28,8 @@ import { summarizeUnifiedDiff } from "./diff.js";
 import { loadPolicyPack } from "./policy.js";
 import { loadExtensionManifests } from "./extensions.js";
 import { prepareGitHubAction, runGitHubCommand } from "./github.js";
+import { DaytonaClient } from "./daytona.js";
+import { redactValue } from "./redaction.js";
 import {
   getAutonomyProfile,
   listAutonomyProfiles,
@@ -40,7 +42,7 @@ import {
   readRepositoryIndex,
 } from "./index.js";
 
-const VERSION = "0.9.7";
+const VERSION = "0.9.9";
 
 function usage(): string {
   return `Forge CLI v${VERSION}
@@ -51,11 +53,14 @@ Usage:
   forge run --prompt <prompt>            Run a task with machine-readable output support
   forge doctor [--repair]                Check runtime; print safe repair guidance
   forge config show|path|set <key> <v>   Inspect or update local configuration
+  forge prompt show|set|clear            Manage an optional user system prompt
   forge session list|recovery|resume|export|delete Manage local sessions
   forge verify <session-id>                 Inspect structured verification evidence
+  forge audit <session-id>                   Review a redacted safety event log
   forge undo <checkpoint-id>              Restore a Forge-managed checkpoint
   forge git status|branch|stage|commit    Use approval-gated local Git workflows
   forge github status|connect|create|clone|push  Use explicit GitHub workflows
+  forge daytona status|create|cleanup       Use optional Daytona sandboxes
   forge git prepare-pr [title]            Prepare a local review-ready PR draft
   forge mcp validate                       Validate MCP config without launching servers
   forge mcp list|enable|disable|tools|call Use explicitly enabled MCP stdio servers
@@ -84,6 +89,8 @@ Options:
   --no-record            Do not persist this session locally
   --policy-pack <file>   Load a deny-only policy pack for this run
   --profile <name>       Select a bounded autonomy profile
+  --daytona-sandbox <id> Associate an existing Daytona sandbox with this run
+  --daytona-cleanup stop|delete  Explicitly clean the associated sandbox after the run
   --help                 Show this help
   --version              Show the version
 `;
@@ -102,8 +109,10 @@ function parseArgs(argv: string[]): ParsedArgs {
     "run",
     "doctor",
     "config",
+    "prompt",
     "session",
     "inspect",
+    "audit",
     "verify",
     "undo",
     "integrations",
@@ -119,6 +128,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     "extensions",
     "git",
     "github",
+    "daytona",
     "help",
   ]);
   const command = first && knownCommands.has(first) ? first : "interactive";
@@ -203,6 +213,12 @@ function renderEvent(event: ForgeEvent, json: boolean): void {
         ),
       );
       break;
+    case "agent.repair":
+      console.log(
+        `\n[repair ${event.status}] attempt ${event.attempt}/${event.maxAttempts} (${event.strategy})`,
+      );
+      console.log(`Reason: ${event.reason}`);
+      break;
     case "agent.plan":
       console.log("\nPlan:");
       console.log(`Goal: ${event.goal}`);
@@ -280,6 +296,64 @@ async function doctor(args?: ParsedArgs): Promise<number> {
   );
   console.log(`Session data: ${supervisor.getSessionPath()}`);
   return result.status === "completed" ? 0 : 1;
+}
+
+function systemPromptPath(): string {
+  return path.join(
+    process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
+    "forge",
+    "system-prompt.txt",
+  );
+}
+
+async function loadSystemPrompt(): Promise<string | undefined> {
+  const content = await fs
+    .readFile(systemPromptPath(), "utf8")
+    .catch(() => null);
+  return content ? content.slice(0, 20_000) : undefined;
+}
+
+async function promptCommand(args: ParsedArgs): Promise<number> {
+  const action = args.positional[0] ?? "show";
+  const promptPath = systemPromptPath();
+  if (action === "show") {
+    const content = await fs.readFile(promptPath, "utf8").catch(() => null);
+    if (content === null) {
+      console.log("No user system prompt configured.");
+      return 0;
+    }
+    process.stdout.write(content);
+    if (!content.endsWith("\n")) process.stdout.write("\n");
+    return 0;
+  }
+  if (action === "clear") {
+    await fs.unlink(promptPath).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    });
+    console.log("User system prompt cleared.");
+    return 0;
+  }
+  if (action === "set") {
+    const file = flagString(args.flags, "file");
+    const content = file
+      ? await fs.readFile(path.resolve(file), "utf8")
+      : args.positional.slice(1).join(" ");
+    if (!content.trim() || content.length > 20_000 || content.includes("\0")) {
+      console.error(
+        "A user system prompt must contain 1-20000 safe characters.",
+      );
+      return 2;
+    }
+    await fs.mkdir(path.dirname(promptPath), { recursive: true, mode: 0o700 });
+    const existing = await fs.lstat(promptPath).catch(() => null);
+    if (existing?.isSymbolicLink())
+      throw new Error("System prompt path cannot be a symbolic link");
+    await fs.writeFile(promptPath, content, { encoding: "utf8", mode: 0o600 });
+    console.log(`User system prompt saved to ${promptPath}`);
+    return 0;
+  }
+  console.error("Usage: forge prompt show|set <text>|set --file <path>|clear");
+  return 2;
 }
 
 async function configCommand(args: ParsedArgs): Promise<number> {
@@ -456,6 +530,162 @@ async function sessionCommand(args: ParsedArgs): Promise<number> {
   return 2;
 }
 
+async function auditCommand(args: ParsedArgs): Promise<number> {
+  const sessionId = args.positional[0];
+  if (!sessionId) {
+    console.error("Usage: forge audit <session-id>");
+    return 2;
+  }
+  try {
+    const session = await new ForgeSupervisor().readSession(sessionId);
+    const entries = session.events.map((event) => {
+      switch (event.type) {
+        case "session.start":
+          return {
+            timestamp: event.timestamp,
+            type: event.type,
+            workspace: event.workspace,
+            provider: event.provider,
+            policy: event.policy,
+            profile: event.profile ?? null,
+            workspaceFingerprint: event.workspaceFingerprint ?? null,
+          };
+        case "agent.text":
+          return {
+            timestamp: event.timestamp,
+            type: event.type,
+            text: String(redactValue(event.text.slice(0, 1_000))),
+          };
+        case "agent.plan":
+          return {
+            timestamp: event.timestamp,
+            type: event.type,
+            goal: event.goal,
+            steps: event.steps,
+          };
+        case "agent.checklist":
+          return {
+            timestamp: event.timestamp,
+            type: event.type,
+            items: event.items,
+          };
+        case "agent.scratchpad":
+          return {
+            timestamp: event.timestamp,
+            type: event.type,
+            items: event.items,
+          };
+        case "agent.delegation":
+          return {
+            timestamp: event.timestamp,
+            type: event.type,
+            role: event.role,
+            status: event.status,
+            turns: event.turns,
+            budget: event.budget ?? null,
+            error: event.error ?? null,
+          };
+        case "agent.repair":
+          return {
+            timestamp: event.timestamp,
+            type: event.type,
+            attempt: event.attempt,
+            maxAttempts: event.maxAttempts,
+            strategy: event.strategy,
+            status: event.status,
+            reason: event.reason,
+          };
+        case "tool.proposal":
+          return {
+            timestamp: event.timestamp,
+            type: event.type,
+            tool: event.tool,
+            risk: event.risk,
+            reason: event.reason,
+            arguments: redactValue(event.arguments),
+          };
+        case "approval.result":
+          return {
+            timestamp: event.timestamp,
+            type: event.type,
+            proposalId: event.proposalId,
+            decision: event.decision,
+            category: event.category ?? null,
+          };
+        case "tool.result":
+          return {
+            timestamp: event.timestamp,
+            type: event.type,
+            tool: event.tool,
+            ok: event.ok,
+            approved: event.approved,
+            durationMs: event.durationMs,
+            error: event.error
+              ? {
+                  code: event.error.code,
+                  retryable: event.error.retryable,
+                  message: String(redactValue(event.error.message)),
+                }
+              : null,
+          };
+        case "session.complete":
+          return {
+            timestamp: event.timestamp,
+            type: event.type,
+            status: event.status,
+            summary: String(redactValue(event.summary)),
+            changedFiles: event.changedFiles,
+            checks: event.checks.map((check) => ({
+              command: check.command,
+              ok: check.ok,
+              status: check.status ?? null,
+              exitCode: check.exitCode,
+            })),
+          };
+        case "error":
+          return {
+            timestamp: event.timestamp,
+            type: event.type,
+            code: event.error.code,
+            retryable: event.error.retryable,
+            message: String(redactValue(event.error.message)),
+          };
+        case "user.prompt":
+          return {
+            timestamp: event.timestamp,
+            type: event.type,
+            prompt: String(redactValue(event.prompt.slice(0, 1_000))),
+          };
+        case "session.cancel":
+          return {
+            timestamp: event.timestamp,
+            type: event.type,
+            reason: event.reason,
+          };
+      }
+    });
+    console.log(
+      JSON.stringify(
+        {
+          sessionId: session.id,
+          status: session.status,
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt,
+          eventCount: entries.length,
+          redacted: true,
+          entries,
+        },
+        null,
+        2,
+      ),
+    );
+    return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
 async function verifyCommand(args: ParsedArgs): Promise<number> {
   const sessionId = args.positional[0];
   if (!sessionId) {
@@ -527,6 +757,12 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
     const approvalCounts: Record<string, number> = {};
     const delegation: Array<{ role: string; status: string; turns: number }> =
       [];
+    const repairs: Array<{
+      attempt: number;
+      strategy: "alternate" | "deep-thinking";
+      status: "started" | "succeeded" | "failed" | "exhausted";
+      reason: string;
+    }> = [];
     let delegationBudget:
       | {
           profile: "economy" | "balanced" | "quality";
@@ -565,6 +801,14 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
       if (event.type === "approval.result")
         approvalCounts[event.decision] =
           (approvalCounts[event.decision] ?? 0) + 1;
+      if (event.type === "agent.repair") {
+        repairs.push({
+          attempt: event.attempt,
+          strategy: event.strategy,
+          status: event.status,
+          reason: event.reason,
+        });
+      }
       if (event.type === "agent.delegation") {
         delegation.push({
           role: event.role,
@@ -603,6 +847,7 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
           toolMetrics,
           approvalCounts,
           delegation,
+          repairs,
           delegationBudget: delegationBudget ?? null,
           checks,
         },
@@ -789,6 +1034,108 @@ async function githubCommand(args: ParsedArgs): Promise<number> {
   }
 }
 
+async function daytonaCommand(args: ParsedArgs): Promise<number> {
+  const action = args.positional[0] ?? "status";
+  const client = new DaytonaClient();
+  if (action === "status") {
+    const id = args.positional[1];
+    const result = await client.getSandbox(id);
+    console.log(
+      JSON.stringify({ action, ...client.configuration(), ...result }, null, 2),
+    );
+    return result.ok ? 0 : 1;
+  }
+  if (action === "create") {
+    if (!input.isTTY) {
+      console.error(
+        "Daytona sandbox creation requires an interactive terminal approval.",
+      );
+      return 2;
+    }
+    const rl = createInterface({ input, output });
+    try {
+      const answer = (
+        await rl.question("Create a Daytona sandbox? Type YES to continue: ")
+      ).trim();
+      if (answer !== "YES") {
+        console.log("Daytona sandbox creation denied.");
+        return 1;
+      }
+    } finally {
+      rl.close();
+    }
+    const language = flagString(args.flags, "language");
+    if (
+      language &&
+      !["python", "typescript", "javascript"].includes(language)
+    ) {
+      console.error("--language must be python, typescript, or javascript");
+      return 2;
+    }
+    const intervalRaw = args.flags["auto-delete-minutes"];
+    const autoDeleteInterval =
+      typeof intervalRaw === "string"
+        ? boundedFlagInt(args.flags, "auto-delete-minutes", 0, -1, 43_200)
+        : undefined;
+    const result = await client.createSandbox({
+      ...(flagString(args.flags, "snapshot")
+        ? { snapshot: flagString(args.flags, "snapshot") }
+        : {}),
+      ...(flagString(args.flags, "image")
+        ? { image: flagString(args.flags, "image") }
+        : {}),
+      ...(language
+        ? { language: language as "python" | "typescript" | "javascript" }
+        : {}),
+      ...(autoDeleteInterval === undefined ? {} : { autoDeleteInterval }),
+    });
+    console.log(JSON.stringify({ action, ...result }, null, 2));
+    return result.ok ? 0 : 1;
+  }
+  if (action === "cleanup") {
+    const id = args.positional[1];
+    const cleanup = flagString(args.flags, "action", "stop");
+    if (!id || (cleanup !== "stop" && cleanup !== "delete")) {
+      console.error(
+        "Usage: forge daytona cleanup <sandbox-id> [--action stop|delete]",
+      );
+      return 2;
+    }
+    if (!input.isTTY) {
+      console.error(
+        "Daytona cleanup requires an interactive terminal approval; use status for read-only inspection.",
+      );
+      return 2;
+    }
+    const rl = createInterface({ input, output });
+    try {
+      const answer = (
+        await rl.question(
+          `Daytona ${cleanup} for ${id}? Type YES to continue: `,
+        )
+      ).trim();
+      if (answer !== "YES") {
+        console.log("Daytona cleanup denied.");
+        return 1;
+      }
+    } finally {
+      rl.close();
+    }
+    const result =
+      cleanup === "delete"
+        ? await client.deleteSandbox(id)
+        : await client.stopSandbox(id);
+    console.log(
+      JSON.stringify({ action: cleanup, sandboxId: id, ...result }, null, 2),
+    );
+    return result.ok ? 0 : 1;
+  }
+  console.error(
+    "Usage: forge daytona status [sandbox-id]|create|cleanup <sandbox-id> [--action stop|delete]",
+  );
+  return 2;
+}
+
 async function indexCommand(args: ParsedArgs): Promise<number> {
   const action = args.positional[0] ?? "show";
   const workspace = path.resolve(
@@ -870,6 +1217,7 @@ async function contextCommand(args: ParsedArgs): Promise<number> {
           projectType: context.projectType,
           packageManager: context.packageManager,
           changedFiles: context.changedFiles,
+          contextStats: context.stats,
           relevantFiles: context.relevantFiles.map(
             ({ path: filePath, bytes, symbols, reasons }) => ({
               path: filePath,
@@ -1419,9 +1767,11 @@ async function runTask(
     const policyPack = policyPackPath
       ? await loadPolicyPack(path.resolve(policyPackPath))
       : undefined;
+    const systemPrompt = await loadSystemPrompt();
     const runOptions = {
       prompt,
       workspace,
+      ...(systemPrompt ? { systemPrompt } : {}),
       policy: "safe" as const,
       json: isJson,
       onEvent: (event: ForgeEvent) => {
@@ -1467,6 +1817,44 @@ async function runTask(
       },
     };
     const result = await supervisor.run(runOptions);
+    const sandboxId = flagString(args.flags, "daytona-sandbox");
+    const cleanup = flagString(args.flags, "daytona-cleanup");
+    if (cleanup && !sandboxId)
+      throw new Error("--daytona-cleanup requires --daytona-sandbox <id>");
+    if (sandboxId && cleanup) {
+      if (cleanup !== "stop" && cleanup !== "delete")
+        throw new Error("--daytona-cleanup must be stop or delete");
+      if (!input.isTTY)
+        throw new Error(
+          "Daytona cleanup requires an interactive terminal approval",
+        );
+      const rl = createInterface({ input, output });
+      try {
+        const answer = (
+          await rl.question(
+            `Daytona ${cleanup} for ${sandboxId}? Type YES to continue: `,
+          )
+        ).trim();
+        if (answer !== "YES") console.log("Daytona cleanup denied.");
+        else {
+          const client = new DaytonaClient();
+          const cleanupResult =
+            cleanup === "delete"
+              ? await client.deleteSandbox(sandboxId)
+              : await client.stopSandbox(sandboxId);
+          console.log(
+            JSON.stringify(
+              { action: cleanup, sandboxId, ...cleanupResult },
+              null,
+              2,
+            ),
+          );
+          if (!cleanupResult.ok) return 1;
+        }
+      } finally {
+        rl.close();
+      }
+    }
     return result.status === "completed" ? 0 : 1;
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
@@ -1489,8 +1877,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   }
   if (args.command === "doctor") return doctor(args);
   if (args.command === "config") return configCommand(args);
+  if (args.command === "prompt") return promptCommand(args);
   if (args.command === "session") return sessionCommand(args);
   if (args.command === "inspect") return inspectCommand(args);
+  if (args.command === "audit") return auditCommand(args);
   if (args.command === "verify") return verifyCommand(args);
   if (args.command === "undo") return undoCommand(args);
   if (args.command === "integrations") return integrationsCommand(args);
@@ -1506,6 +1896,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (args.command === "extensions") return extensionsCommand(args);
   if (args.command === "git") return gitCommand(args);
   if (args.command === "github") return githubCommand(args);
+  if (args.command === "daytona") return daytonaCommand(args);
   return runTask(args);
 }
 

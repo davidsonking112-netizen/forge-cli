@@ -116,6 +116,15 @@ export interface AgentDelegationEvent extends BaseEvent {
   };
 }
 
+export interface AgentRepairEvent extends BaseEvent {
+  type: "agent.repair";
+  attempt: number;
+  maxAttempts: 4;
+  strategy: "alternate" | "deep-thinking";
+  status: "started" | "succeeded" | "failed" | "exhausted";
+  reason: string;
+}
+
 export interface AgentPlanEvent extends BaseEvent {
   type: "agent.plan";
   goal: string;
@@ -212,6 +221,7 @@ export type ForgeEvent =
   | AgentScratchpadEvent
   | AgentChecklistEvent
   | AgentDelegationEvent
+  | AgentRepairEvent
   | AgentPlanEvent
   | ToolProposalEvent
   | ToolResultEvent
@@ -403,6 +413,16 @@ export function isForgeEvent(value: unknown): value is ForgeEvent {
           protocolString(candidate.error, 2_000)) &&
         (candidate.budget === undefined ||
           validDelegationBudget(candidate.budget))
+      );
+    case "agent.repair":
+      return (
+        boundedInteger(candidate.attempt, 1, 4) &&
+        candidate.maxAttempts === 4 &&
+        ["alternate", "deep-thinking"].includes(String(candidate.strategy)) &&
+        ["started", "succeeded", "failed", "exhausted"].includes(
+          String(candidate.status),
+        ) &&
+        protocolString(candidate.reason, 1_000)
       );
     case "agent.plan":
       return (

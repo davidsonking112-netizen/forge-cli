@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.9 — 2026-08-26
+
+Forge v0.9.9 adds optional Daytona sandbox support through supervisor-owned, bounded REST operations. Status is read-only; creation, stop, and delete actions require interactive confirmation, API credentials are never persisted or forwarded to the worker, and task cleanup is opt-in through explicit `--daytona-sandbox` and `--daytona-cleanup` flags.
+
+Context assembly now exposes bounded pruning statistics and provider sessions use a deterministic long-horizon message buffer that retains task anchors and recent evidence while compacting older history. Provider tool failures can receive at most three alternate repair attempts and a fourth deep-thinking attempt; typed repair events record the outcome and exhaustion fails closed.
+
+Users can review a redacted post-run safety history with `forge audit <session-id>` and configure a bounded non-authoritative preference with `forge prompt show|set|clear`. The TypeScript supervisor remains the sole filesystem/process authority, writes and commands remain approval-gated, remote actions remain explicit, and the immutable global deny ceiling is unchanged.
+
 ## 0.9.7 — 2026-08-26
 
 Forge v0.9.7 adds visible bounded planning checklists with user expectations at inspection, planning, approval, change, verification, and summary stages. Checklist events are validated, persisted with legacy-safe normalization, rendered in simple mode and the full-screen TUI, and exposed through `forge inspect`; they remain informational planning metadata and cannot authorize tools.

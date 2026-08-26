@@ -1,6 +1,6 @@
 {
   "name": "@forge/cli",
-  "version": "0.9.7",
+  "version": "0.9.9",
   "private": true,
   "type": "module",
   "bin": {

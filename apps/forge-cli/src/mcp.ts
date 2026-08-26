@@ -96,7 +96,7 @@ export class McpStdioClient {
     await this.request("initialize", {
       protocolVersion: "2025-06-18",
       capabilities: {},
-      clientInfo: { name: "forge-cli", version: "0.9.7" },
+      clientInfo: { name: "forge-cli", version: "0.9.9" },
     });
     this.notify("notifications/initialized", {});
   }

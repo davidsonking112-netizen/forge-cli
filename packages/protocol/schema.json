@@ -120,6 +120,20 @@
       }
     },
     {
+      "if": { "properties": { "type": { "const": "agent.repair" } } },
+      "then": {
+        "required": ["attempt", "maxAttempts", "strategy", "status", "reason"],
+        "properties": {
+          "attempt": { "type": "integer", "minimum": 1, "maximum": 4 },
+          "maxAttempts": { "const": 4 },
+          "strategy": { "enum": ["alternate", "deep-thinking"] },
+          "status": { "enum": ["started", "succeeded", "failed", "exhausted"] },
+          "reason": { "type": "string", "maxLength": 1000 }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
       "if": { "properties": { "type": { "const": "session.start" } } },
       "then": {
         "properties": {

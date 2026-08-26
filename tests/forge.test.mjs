@@ -11,7 +11,10 @@ import {
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { buildRepositoryContext } from "../dist/apps/forge-cli/src/context.js";
+import {
+  buildRepositoryContext,
+  DEFAULT_CONTEXT_BUDGET,
+} from "../dist/apps/forge-cli/src/context.js";
 import {
   AcpBridge,
   AcpJsonlBridge,
@@ -24,6 +27,7 @@ import { McpStdioClient } from "../dist/apps/forge-cli/src/mcp.js";
 import { ForgeSupervisor } from "../dist/apps/forge-cli/src/supervisor.js";
 import { SessionStore } from "../dist/apps/forge-cli/src/sessions.js";
 import { boundedFlagInt } from "../dist/apps/forge-cli/src/main.js";
+import { DaytonaClient } from "../dist/apps/forge-cli/src/daytona.js";
 import {
   createEnvelope,
   isForgeEvent,
@@ -57,6 +61,51 @@ async function tempWorkspace() {
   await writeFile(path.join(directory, "app.txt"), "hello forge\n");
   return directory;
 }
+
+test("Daytona support is optional, bounded, and uses explicit lifecycle endpoints", async () => {
+  const unconfigured = new DaytonaClient({ apiKey: undefined });
+  assert.equal(unconfigured.configuration().configured, false);
+  const unavailable = await unconfigured.getSandbox();
+  assert.equal(unavailable.ok, false);
+  assert.match(unavailable.error ?? "", /not configured/i);
+
+  const requests = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), init });
+    const body = JSON.stringify({ id: "sb-123", token: "secret-value" });
+    return {
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => new TextEncoder().encode(body).buffer,
+    };
+  };
+  try {
+    const client = new DaytonaClient({ apiKey: "test-secret" });
+    assert.equal((await client.getSandbox("sb-123")).ok, true);
+    assert.equal((await client.stopSandbox("sb-123")).ok, true);
+    assert.equal((await client.deleteSandbox("sb-123")).ok, true);
+    const create = await client.createSandbox({
+      snapshot: "daytona-small",
+      language: "typescript",
+      autoDeleteInterval: 60,
+    });
+    assert.equal(create.ok, true);
+    assert.deepEqual(
+      requests.map((request) => [request.url, request.init.method]),
+      [
+        ["https://app.daytona.io/api/sandbox/sb-123", "GET"],
+        ["https://app.daytona.io/api/sandbox/sb-123/stop", "POST"],
+        ["https://app.daytona.io/api/sandbox/sb-123", "DELETE"],
+        ["https://app.daytona.io/api/sandbox", "POST"],
+      ],
+    );
+    assert.match(JSON.stringify(create.data), /REDACTED/);
+    await assert.rejects(() => client.getSandbox("../escape"), /invalid/i);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
 
 test("v0.95 GitHub actions are explicit, private by default, and path bounded", async () => {
   const workspace = await tempWorkspace();
@@ -193,6 +242,24 @@ test("v0.9 protocol validation rejects malformed and unbounded event data", () =
     },
   };
   assert.equal(isForgeEvent(delegation), true);
+  const repair = {
+    ...createEnvelope("agent.repair", "session-1"),
+    type: "agent.repair",
+    attempt: 4,
+    maxAttempts: 4,
+    strategy: "deep-thinking",
+    status: "started",
+    reason: "Alternate attempts did not resolve the bounded failure.",
+  };
+  assert.equal(isForgeEvent(repair), true);
+  assert.throws(
+    () => parseForgeEvent(JSON.stringify({ ...repair, attempt: 5 })),
+    /invalid|bound/i,
+  );
+  assert.throws(
+    () => parseForgeEvent(JSON.stringify({ ...repair, maxAttempts: 5 })),
+    /invalid|bound/i,
+  );
   assert.throws(
     () =>
       parseForgeEvent(
@@ -1035,6 +1102,19 @@ test("context engine respects ignore patterns and ranks relevant files", async (
     assert.equal(context.relevantFiles[0]?.path, "README.md");
     const source = context.relevantFiles.find((file) => file.path === "src.ts");
     assert.ok(source?.symbols?.includes("target"));
+    await writeFile(
+      path.join(directory, "large.txt"),
+      "large context ".repeat(5_000),
+    );
+    const compact = await buildRepositoryContext(directory, "large", {
+      ...DEFAULT_CONTEXT_BUDGET,
+      maxRelevantFiles: 4,
+      maxFileChars: 3_000,
+      maxTotalChars: 8_000,
+    });
+    assert.ok(compact.stats.includedChars <= 8_000);
+    assert.ok(compact.stats.truncatedFiles >= 1);
+    assert.ok(compact.stats.prunedFiles >= 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

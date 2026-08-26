@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { redactValue } from "./redaction.js";
 import type {
   CheckResult,
   ChecklistItem,
@@ -386,24 +387,4 @@ function currentJournalEntry(
         entry.status === "active" || entry.status === "awaiting-approval",
     ) ?? record.journal.find((entry) => entry.status === "pending")
   );
-}
-
-function redactValue(value: unknown): unknown {
-  if (typeof value === "string")
-    return value.replace(
-      /(api[_-]?key|token|password|secret)\s*[:=]\s*\S+|bearer\s+[A-Za-z0-9._~+/=-]+|sk-[A-Za-z0-9_-]{8,}/gi,
-      (match) => {
-        const separator = match.match(/\s*[:=]\s*/)?.[0];
-        if (separator)
-          return `${match.slice(0, match.indexOf(separator))}${separator}[REDACTED]`;
-        if (/^bearer\s/i.test(match)) return "Bearer [REDACTED]";
-        return "sk-[REDACTED]";
-      },
-    );
-  if (Array.isArray(value)) return value.map(redactValue);
-  if (value && typeof value === "object")
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, redactValue(entry)]),
-    );
-  return value;
 }

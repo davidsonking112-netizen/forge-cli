@@ -452,6 +452,14 @@ test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MC
     );
     assert.equal(context.status, 0);
     assert.match(context.stdout, /relevantFiles/);
+    assert.match(context.stdout, /contextStats/);
+    const daytona = spawnSync(process.execPath, [cli, "daytona", "status"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: { ...process.env, DAYTONA_API_KEY: "", DAYTONA_API_URL: "" },
+    });
+    assert.equal(daytona.status, 1);
+    assert.match(daytona.stdout, /configured/);
     const extensionDir = path.join(root, "extensions");
     await mkdir(extensionDir);
     await writeFile(
@@ -489,14 +497,35 @@ test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MC
     const planState = await mkdtemp(
       path.join(os.tmpdir(), "forge-v07-cli-state-"),
     );
+    const promptConfig = await mkdtemp(
+      path.join(os.tmpdir(), "forge-v099-cli-config-"),
+    );
+    const cliEnv = {
+      ...process.env,
+      XDG_STATE_HOME: planState,
+      XDG_CONFIG_HOME: promptConfig,
+    };
     try {
+      const promptSet = spawnSync(
+        process.execPath,
+        [cli, "prompt", "set", "Prefer concise evidence"],
+        { cwd: process.cwd(), encoding: "utf8", env: cliEnv },
+      );
+      assert.equal(promptSet.status, 0);
+      const promptShow = spawnSync(process.execPath, [cli, "prompt", "show"], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: cliEnv,
+      });
+      assert.equal(promptShow.status, 0);
+      assert.match(promptShow.stdout, /Prefer concise evidence/);
       const planned = spawnSync(
         process.execPath,
         [cli, "plan", "Explain the stress fixture", "--workspace", root],
         {
           cwd: process.cwd(),
           encoding: "utf8",
-          env: { ...process.env, XDG_STATE_HOME: planState },
+          env: cliEnv,
         },
       );
       assert.equal(planned.status, 0);
@@ -506,7 +535,7 @@ test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MC
         {
           cwd: process.cwd(),
           encoding: "utf8",
-          env: { ...process.env, XDG_STATE_HOME: planState },
+          env: cliEnv,
         },
       );
       assert.equal(listedSessions.status, 0);
@@ -518,7 +547,7 @@ test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MC
         {
           cwd: process.cwd(),
           encoding: "utf8",
-          env: { ...process.env, XDG_STATE_HOME: planState },
+          env: cliEnv,
         },
       );
       assert.equal(inspection.status, 0);
@@ -527,13 +556,21 @@ test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MC
       assert.match(inspection.stdout, /scratchpad/);
       assert.match(inspection.stdout, /checklist/);
       assert.match(inspection.stdout, /delegationBudget/);
+      const audit = spawnSync(process.execPath, [cli, "audit", sessionId], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: cliEnv,
+      });
+      assert.equal(audit.status, 0);
+      assert.match(audit.stdout, /"redacted": true/);
+      assert.match(audit.stdout, /agent.checklist/);
       const recovery = spawnSync(
         process.execPath,
         [cli, "session", "recovery", sessionId],
         {
           cwd: process.cwd(),
           encoding: "utf8",
-          env: { ...process.env, XDG_STATE_HOME: planState },
+          env: cliEnv,
         },
       );
       assert.equal(recovery.status, 0);
@@ -544,7 +581,7 @@ test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MC
         {
           cwd: process.cwd(),
           encoding: "utf8",
-          env: { ...process.env, XDG_STATE_HOME: planState },
+          env: cliEnv,
         },
       );
       assert.equal(verification.status, 1);
@@ -553,6 +590,7 @@ test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MC
       assert.match(verification.stdout, /nextAction/);
     } finally {
       await rm(planState, { recursive: true, force: true });
+      await rm(promptConfig, { recursive: true, force: true });
     }
     const draft = spawnSync(
       process.execPath,

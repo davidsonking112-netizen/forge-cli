@@ -29,6 +29,10 @@ export class FullScreenTui {
     if (!this.active) return;
     if (event.type === "agent.checklist") this.checklist = event.items;
     if (event.type === "agent.text") this.lines.push(`Forge  ${event.text}`);
+    if (event.type === "agent.repair")
+      this.lines.push(
+        `[repair ${event.status}] attempt ${event.attempt}/${event.maxAttempts} ${event.strategy}: ${event.reason}`,
+      );
     if (event.type === "agent.delegation")
       this.lines.push(
         `[${event.status}] ${event.role} specialist (${event.turns} turn${event.turns === 1 ? "" : "s"})`,
@@ -64,7 +68,7 @@ export class FullScreenTui {
   private draw(): void {
     if (!this.active) return;
     const width = Math.max(40, Math.min(process.stdout.columns ?? 100, 120));
-    const title = ` Forge CLI v0.9.7 | ${"local-first coding agent".padEnd(width - 21, " ")} `;
+    const title = ` Forge CLI v0.9.9 | ${"local-first coding agent".padEnd(width - 21, " ")} `;
     process.stdout.write(
       `\x1b[2J\x1b[H\x1b[1;36m${title.slice(0, width)}\x1b[0m\n`,
     );

@@ -15,6 +15,33 @@ export interface ContextFile {
   reasons?: string[];
 }
 
+export interface ContextBudget {
+  maxFiles: number;
+  maxRelevantFiles: number;
+  maxFileChars: number;
+  maxTotalChars: number;
+  maxInstructionsChars: number;
+  maxChangedFiles: number;
+}
+
+export interface ContextStats {
+  scannedFiles: number;
+  candidateFiles: number;
+  includedFiles: number;
+  includedChars: number;
+  prunedFiles: number;
+  truncatedFiles: number;
+}
+
+export const DEFAULT_CONTEXT_BUDGET: Readonly<ContextBudget> = {
+  maxFiles: 2_000,
+  maxRelevantFiles: 16,
+  maxFileChars: 24_000,
+  maxTotalChars: 100_000,
+  maxInstructionsChars: 12_000,
+  maxChangedFiles: 200,
+};
+
 export interface RepositoryContext {
   root: string;
   projectType: string;
@@ -24,6 +51,7 @@ export interface RepositoryContext {
   relevantFiles: ContextFile[];
   verificationCommands: string[][];
   changedFiles: string[];
+  stats: ContextStats;
 }
 
 export function fingerprintRepositoryContext(
@@ -124,7 +152,33 @@ function selectionReasons(
   return reasons;
 }
 
-async function collect(root: string): Promise<ContextFile[]> {
+function normalizeBudget(budget: ContextBudget): ContextBudget {
+  return {
+    maxFiles: Math.max(1, Math.min(2_000, Math.trunc(budget.maxFiles))),
+    maxRelevantFiles: Math.max(
+      1,
+      Math.min(64, Math.trunc(budget.maxRelevantFiles)),
+    ),
+    maxFileChars: Math.max(
+      1_000,
+      Math.min(50_000, Math.trunc(budget.maxFileChars)),
+    ),
+    maxTotalChars: Math.max(
+      8_000,
+      Math.min(500_000, Math.trunc(budget.maxTotalChars)),
+    ),
+    maxInstructionsChars: Math.max(
+      1_000,
+      Math.min(20_000, Math.trunc(budget.maxInstructionsChars)),
+    ),
+    maxChangedFiles: Math.max(
+      1,
+      Math.min(200, Math.trunc(budget.maxChangedFiles)),
+    ),
+  };
+}
+
+async function collect(root: string, maxFiles: number): Promise<ContextFile[]> {
   const ignoreContent = await fs
     .readFile(path.join(root, ".gitignore"), "utf8")
     .catch(() => "");
@@ -168,14 +222,17 @@ async function collect(root: string): Promise<ContextFile[]> {
           mtimeMs: Math.trunc(stat.mtimeMs),
         });
       }
-      if (files.length >= 2000) return;
+      if (files.length >= maxFiles) return;
     }
   };
   await visit(root);
   return files;
 }
 
-async function detectChangedFiles(root: string): Promise<string[]> {
+async function detectChangedFiles(
+  root: string,
+  maxChangedFiles: number,
+): Promise<string[]> {
   try {
     const result = await execFileAsync(
       "git",
@@ -192,16 +249,19 @@ async function detectChangedFiles(root: string): Promise<string[]> {
       .filter(
         (value) => value && !value.startsWith("../") && !path.isAbsolute(value),
       )
-      .slice(0, 200);
+      .slice(0, maxChangedFiles);
   } catch {
     return [];
   }
 }
 
-async function readInstructions(root: string): Promise<string | null> {
+async function readInstructions(
+  root: string,
+  maxChars: number,
+): Promise<string | null> {
   const file = path.join(root, "FORGE.md");
   const content = await fs.readFile(file, "utf8").catch(() => null);
-  return content ? content.slice(0, 12_000) : null;
+  return content ? content.slice(0, maxChars) : null;
 }
 
 async function detectVerificationCommands(
@@ -237,32 +297,45 @@ async function detectVerificationCommands(
 export async function buildRepositoryContext(
   root: string,
   prompt: string,
+  requestedBudget: ContextBudget = DEFAULT_CONTEXT_BUDGET,
 ): Promise<RepositoryContext> {
-  const files = await collect(root);
+  const budget = normalizeBudget(requestedBudget);
+  const files = await collect(root, budget.maxFiles);
   const terms = prompt
     .toLowerCase()
     .split(/[^a-z0-9_/-]+/)
     .filter(Boolean);
-  const changedFiles = await detectChangedFiles(root);
+  const changedFiles = await detectChangedFiles(root, budget.maxChangedFiles);
   const changedFileSet = new Set(changedFiles);
   const relevantFiles: ContextFile[] = [];
-  for (const file of [...files]
+  let includedChars = 0;
+  let truncatedFiles = 0;
+  const candidates = [...files]
     .sort(
       (a, b) =>
         score(b.path, terms, changedFileSet) -
           score(a.path, terms, changedFileSet) || a.path.localeCompare(b.path),
     )
-    .slice(0, 16)) {
+    .slice(0, budget.maxRelevantFiles);
+  for (const file of candidates) {
     if (file.bytes > 200_000) continue;
     const content = await fs
       .readFile(path.join(root, file.path), "utf8")
       .catch(() => null);
     if (content === null || !isText(Buffer.from(content))) continue;
+    const marker = "\n...[truncated]";
+    const remaining = budget.maxTotalChars - includedChars;
+    if (remaining <= 0) break;
+    const limit = Math.min(budget.maxFileChars, remaining);
+    const wasTruncated = content.length > limit;
+    const visible = wasTruncated
+      ? content.slice(0, Math.max(0, limit - marker.length)) + marker
+      : content;
+    includedChars += visible.length;
+    if (wasTruncated) truncatedFiles += 1;
     relevantFiles.push({
       ...file,
-      content:
-        content.slice(0, 24_000) +
-        (content.length > 24_000 ? "\n...[truncated]" : ""),
+      content: visible,
       symbols: extractSymbols(content),
       reasons: selectionReasons(file.path, terms, changedFileSet).map(
         (reason) => reason.label,
@@ -295,10 +368,18 @@ export async function buildRepositoryContext(
     root,
     projectType,
     packageManager,
-    instructions: await readInstructions(root),
+    instructions: await readInstructions(root, budget.maxInstructionsChars),
     files,
     relevantFiles,
     verificationCommands: await detectVerificationCommands(root, files),
     changedFiles,
+    stats: {
+      scannedFiles: files.length,
+      candidateFiles: candidates.length,
+      includedFiles: relevantFiles.length,
+      includedChars,
+      prunedFiles: Math.max(0, files.length - relevantFiles.length),
+      truncatedFiles,
+    },
   };
 }
