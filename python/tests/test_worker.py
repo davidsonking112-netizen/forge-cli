@@ -322,23 +322,26 @@ class WorkerTests(unittest.TestCase):
 
     def test_provider_normalizes_tool_calls(self):
         provider = OpenAICompatibleProvider.__new__(OpenAICompatibleProvider)
-        reply = provider._parse_payload({"choices": [{"message": {"content": "", "tool_calls": [{"id": "call-1", "function": {"name": "workspace.read", "arguments": '{"path":"README.md"}'}}]}}], "usage": {"total_tokens": 3}})
+        reply = provider._parse_payload({"choices": [{"message": {"content": "", "tool_calls": [{"id": "call-1", "function": {"name": "workspace.read", "arguments": '{"path":"README.md"}'}, "extra_content": {"google": {"thought_signature": "sig-1"}}}]}}], "usage": {"total_tokens": 3}})
         self.assertEqual(reply.tool_calls[0].name, "workspace.read")
         self.assertEqual(reply.tool_calls[0].arguments["path"], "README.md")
         self.assertEqual(reply.usage["total_tokens"], 3)
+        self.assertEqual(reply.raw_message["tool_calls"][0]["extra_content"]["google"]["thought_signature"], "sig-1")
 
     def test_streaming_provider_normalizes_fragments(self):
         provider = OpenAICompatibleProvider.__new__(OpenAICompatibleProvider)
         chunks = [
             b'data: {"choices":[{"delta":{"content":"hello "}}]}\n\n',
             b'data: {"choices":[{"delta":{"content":"world"}}]}\n\n',
-            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"workspace.read","arguments":"{\\"path\\":\\"README.md\\"}"}}]}}]}\n\n',
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"workspace.read","arguments":"{\\"path\\":\\"README.md\\"}"},"extra_content":{"google":{"thought_signature":"sig-stream"}}}]}}]}\n\n',
             b'data: [DONE]\n\n',
         ]
         fragments = []
         reply = provider._read_stream(chunks, fragments.append)
         self.assertEqual("".join(fragments), "hello world")
         self.assertEqual(reply.tool_calls[0].arguments["path"], "README.md")
+        self.assertEqual(reply.raw_message["role"], "assistant")
+        self.assertEqual(reply.raw_message["tool_calls"][0]["extra_content"]["google"]["thought_signature"], "sig-stream")
 
     def test_mock_provider_streams_text_callback(self):
         fragments = []

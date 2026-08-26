@@ -202,12 +202,39 @@ class OpenAICompatibleProvider:
                 on_text(fragment)
             for call in delta.get("tool_calls") or []:
                 index = str(call.get("index", 0))
-                state = tool_fragments.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                state = tool_fragments.setdefault(
+                    index,
+                    {"id": "", "name": "", "arguments": "", "metadata": {}},
+                )
                 state["id"] += str(call.get("id") or "")
                 function = call.get("function") or {}
                 state["name"] += str(function.get("name") or "")
                 state["arguments"] += str(function.get("arguments") or "")
-        return ProviderReply(text="".join(text_parts), tool_calls=self._parse_tool_fragments(tool_fragments), usage=usage)
+                for key in ("extra_content", "thought_signature", "thoughtSignature"):
+                    if key in call:
+                        state["metadata"][key] = call[key]
+        calls = self._parse_tool_fragments(tool_fragments)
+        raw_calls: list[dict[str, Any]] = []
+        for state in tool_fragments.values():
+            raw_call: dict[str, Any] = {
+                "id": state["id"],
+                "type": "function",
+                "function": {
+                    "name": state["name"],
+                    "arguments": state["arguments"] or "{}",
+                },
+            }
+            raw_call.update(state["metadata"])
+            raw_calls.append(raw_call)
+        raw_message: dict[str, Any] = {"role": "assistant", "content": "".join(text_parts)}
+        if raw_calls:
+            raw_message["tool_calls"] = raw_calls
+        return ProviderReply(
+            text="".join(text_parts),
+            tool_calls=calls,
+            usage=usage,
+            raw_message=raw_message if raw_calls else {},
+        )
 
     def _parse_payload(self, payload: dict[str, Any]) -> ProviderReply:
         choice = (payload.get("choices") or [{}])[0]
