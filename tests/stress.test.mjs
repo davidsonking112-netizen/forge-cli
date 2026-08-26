@@ -203,6 +203,27 @@ test("MCP requests support explicit AbortSignal cancellation", async () => {
   }
 });
 
+test("MCP close rejects pending requests", async () => {
+  const serverScript =
+    "process.stdin.setEncoding('utf8'); let buffer=''; process.stdin.on('data', chunk => { buffer += chunk; for (const line of buffer.split('\\n').slice(0, -1)) { const request = JSON.parse(line); if (request.id && request.method === 'initialize') process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,result:{protocolVersion:'2025-06-18',capabilities:{}}})+'\\n'); } buffer = buffer.slice(buffer.lastIndexOf('\\n') + 1); });";
+  const client = new McpStdioClient(
+    {
+      id: "close-fixture",
+      command: process.execPath,
+      args: ["-e", serverScript],
+      enabled: true,
+      explicitConsent: true,
+      trust: "untrusted",
+      defaultRisk: "network",
+    },
+    3000,
+  );
+  await client.start();
+  const pending = client.callTool("local.echo", {});
+  client.close();
+  await assert.rejects(pending, (error) => error?.category === "cancelled");
+});
+
 test("no-record supervisor runs do not persist session data", async () => {
   const root = await fixture();
   const state = await mkdtemp(path.join(os.tmpdir(), "forge-no-record-state-"));
@@ -256,6 +277,15 @@ test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MC
     });
     assert.equal(profiles.status, 0);
     assert.match(profiles.stdout, /research/);
+    const providers = spawnSync(process.execPath, [cli, "providers"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: { ...process.env, FORGE_API_KEY: "must-not-appear" },
+    });
+    assert.equal(providers.status, 0);
+    assert.match(providers.stdout, /openrouter/);
+    assert.match(providers.stdout, /Set FORGE_PROVIDER=openai-compatible/);
+    assert.doesNotMatch(providers.stdout, /must-not-appear/);
     const indexState = path.join(root, "index-state");
     const indexEnv = { ...process.env, XDG_STATE_HOME: indexState };
     const indexBuild = spawnSync(

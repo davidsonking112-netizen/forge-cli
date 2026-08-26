@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,40 @@ class Provider(Protocol):
         on_text: Callable[[str], None] | None = None,
     ) -> ProviderReply:
         """Return a normalized response for the current conversation."""
+
+
+PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "key_envs": ("OPENROUTER_API_KEY",),
+        "model": "openai/gpt-4o-mini",
+    },
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "key_envs": ("GROQ_API_KEY",),
+        "model": "llama-3.3-70b-versatile",
+    },
+    "gemini": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "key_envs": ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_STUDIO_API_KEY"),
+        "model": "gemini-2.0-flash",
+    },
+    "google": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "key_envs": ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_STUDIO_API_KEY"),
+        "model": "gemini-2.0-flash",
+    },
+    "google-ai-studio": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "key_envs": ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_STUDIO_API_KEY"),
+        "model": "gemini-2.0-flash",
+    },
+    "xai": {
+        "base_url": "https://api.x.ai/v1",
+        "key_envs": ("XAI_API_KEY",),
+        "model": "grok-3-mini",
+    },
+}
 
 
 class MockProvider:
@@ -77,7 +111,7 @@ def redact(text: str) -> str:
 
 
 class OpenAICompatibleProvider:
-    def __init__(self, *, api_key: str, base_url: str, model: str, timeout: float = 90.0, max_tokens: int | None = None, reasoning_effort: str | None = None, max_retries: int = 2) -> None:
+    def __init__(self, *, api_key: str, base_url: str, model: str, timeout: float = 90.0, max_tokens: int | None = None, reasoning_effort: str | None = None, max_retries: int = 2, headers: dict[str, str] | None = None, token_parameter: Literal["auto", "max_tokens", "max_completion_tokens"] = "auto") -> None:
         if not api_key:
             raise ValueError("FORGE_API_KEY or OPENAI_API_KEY is required for the OpenAI-compatible provider")
         self.api_key = api_key
@@ -87,6 +121,8 @@ class OpenAICompatibleProvider:
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
         self.max_retries = max(0, min(max_retries, 5))
+        self.token_parameter = token_parameter
+        self.headers = {key: value[:500] for key, value in (headers or {}).items() if value and "\n" not in value and "\r" not in value}
 
     def complete(
         self,
@@ -102,7 +138,10 @@ class OpenAICompatibleProvider:
             "stream": bool(on_text),
         }
         if self.max_tokens is not None:
-            body["max_tokens"] = self.max_tokens
+            parameter = self.token_parameter
+            if parameter == "auto":
+                parameter = "max_completion_tokens" if self.model.lower().startswith("gpt-5") else "max_tokens"
+            body[parameter] = self.max_tokens
         if self.reasoning_effort:
             body["reasoning_effort"] = self.reasoning_effort
         if tools:
@@ -113,6 +152,7 @@ class OpenAICompatibleProvider:
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
+                **self.headers,
             },
             method="POST",
         )
@@ -207,14 +247,33 @@ def build_provider() -> Provider:
     provider_name = os.environ.get("FORGE_PROVIDER", "mock").lower()
     if provider_name in {"mock", "test"}:
         return MockProvider()
-    if provider_name in {"openai", "openai-compatible", "compatible", "xai"}:
+    preset = PROVIDER_PRESETS.get(provider_name)
+    if provider_name in {"openai", "openai-compatible", "compatible"} or preset:
         max_tokens = optional_bounded_env_int("FORGE_MAX_TOKENS", 256, 100_000)
+        if preset:
+            api_key = next((os.environ.get(name, "") for name in preset["key_envs"] if os.environ.get(name)), "")
+            base_url = os.environ.get("FORGE_BASE_URL", preset["base_url"])
+            model = os.environ.get("FORGE_MODEL", preset["model"])
+            if not api_key:
+                raise ValueError(f"{provider_name} requires one of: {', '.join(preset['key_envs'])}")
+        else:
+            api_key = os.environ.get("FORGE_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+            base_url = os.environ.get("FORGE_BASE_URL", "https://api.openai.com/v1")
+            model = os.environ.get("FORGE_MODEL", "gpt-4.1-mini")
+        token_parameter = os.environ.get("FORGE_TOKEN_PARAMETER", "auto")
+        if token_parameter not in {"auto", "max_tokens", "max_completion_tokens"}:
+            token_parameter = "auto"
         return OpenAICompatibleProvider(
-            api_key=os.environ.get("FORGE_API_KEY") or os.environ.get("OPENAI_API_KEY", ""),
-            base_url=os.environ.get("FORGE_BASE_URL", "https://api.openai.com/v1"),
-            model=os.environ.get("FORGE_MODEL", "gpt-4.1-mini"),
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
             max_tokens=max_tokens,
             reasoning_effort=os.environ.get("FORGE_REASONING_EFFORT"),
             max_retries=bounded_env_int("FORGE_PROVIDER_RETRIES", 2, 0, 5),
+            token_parameter=token_parameter,
+            headers={
+                "HTTP-Referer": os.environ.get("FORGE_HTTP_REFERER", "") ,
+                "X-OpenRouter-Title": os.environ.get("FORGE_APP_NAME", "Forge CLI"),
+            },
         )
     raise ValueError(f"Unsupported FORGE_PROVIDER: {provider_name}")

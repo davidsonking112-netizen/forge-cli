@@ -52,6 +52,7 @@ Usage:
   forge plan <prompt>                    Explore and produce a read-only plan
   forge run --prompt <prompt>            Run a task with machine-readable output support
   forge doctor [--repair]                Check runtime; print safe repair guidance
+  forge providers                         List supported provider configuration paths
   forge config show|path|set <key> <v>   Inspect or update local configuration
   forge prompt show|set|clear            Manage an optional user system prompt
   forge session list|recovery|resume|export|delete Manage local sessions
@@ -108,6 +109,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     "plan",
     "run",
     "doctor",
+    "providers",
     "config",
     "prompt",
     "session",
@@ -255,6 +257,46 @@ function renderEvent(event: ForgeEvent, json: boolean): void {
     default:
       break;
   }
+}
+
+async function providersCommand(): Promise<number> {
+  console.log(
+    JSON.stringify(
+      {
+        offline: { provider: "mock", credentials: false },
+        presets: [
+          {
+            name: "openai-compatible",
+            key: "FORGE_API_KEY|OPENAI_API_KEY",
+            baseUrl: "https://api.openai.com/v1",
+          },
+          {
+            name: "openrouter",
+            key: "OPENROUTER_API_KEY",
+            baseUrl: "https://openrouter.ai/api/v1",
+          },
+          {
+            name: "groq",
+            key: "GROQ_API_KEY",
+            baseUrl: "https://api.groq.com/openai/v1",
+          },
+          {
+            name: "google-ai-studio",
+            key: "GEMINI_API_KEY|GOOGLE_API_KEY|GOOGLE_AI_STUDIO_API_KEY",
+            baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+          },
+          { name: "xai", key: "XAI_API_KEY", baseUrl: "https://api.x.ai/v1" },
+        ],
+        generic:
+          "Set FORGE_PROVIDER=openai-compatible with FORGE_BASE_URL and FORGE_MODEL for another OpenAI-compatible service.",
+        credentials:
+          "Keys are read from the environment and never printed, persisted, or forwarded to the supervisor as protocol data.",
+      },
+      null,
+      2,
+    ),
+  );
+  return 0;
 }
 
 async function doctor(args?: ParsedArgs): Promise<number> {
@@ -1410,18 +1452,38 @@ async function acpCommand(args: ParsedArgs): Promise<number> {
     return 2;
   }
   const bridge = new AcpJsonlBridge();
-  const chunks: Buffer[] = [];
-  for await (const chunk of input) chunks.push(Buffer.from(chunk));
-  const inputText = Buffer.concat(chunks).toString("utf8");
-  const lines = inputText.split(/\r?\n/).filter((line) => line.trim());
-  if (lines.length > 200) {
-    console.error("ACP input exceeds the 200-request limit");
+  const maxBytes = 1_000_000;
+  const maxRequests = 200;
+  let buffered = "";
+  let totalBytes = 0;
+  let requestCount = 0;
+  const handleLine = (line: string): void => {
+    if (!line.trim()) return;
+    requestCount += 1;
+    if (requestCount > maxRequests)
+      throw new Error("ACP input exceeds the 200-request limit");
+    process.stdout.write(`${bridge.handleLine(line)}\n`);
+  };
+  try {
+    for await (const chunk of input) {
+      const text = Buffer.from(chunk).toString("utf8");
+      totalBytes += Buffer.byteLength(text, "utf8");
+      if (totalBytes > maxBytes)
+        throw new Error("ACP input exceeds the 1000000-byte limit");
+      buffered += text;
+      let newline = buffered.indexOf("\n");
+      while (newline >= 0) {
+        handleLine(buffered.slice(0, newline).replace(/\r$/, ""));
+        buffered = buffered.slice(newline + 1);
+        newline = buffered.indexOf("\n");
+      }
+    }
+    handleLine(buffered);
+    return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
     return 2;
   }
-  for (const line of lines) {
-    if (line.trim()) process.stdout.write(`${bridge.handleLine(line)}\n`);
-  }
-  return 0;
 }
 
 async function previewDiffCommand(args: ParsedArgs): Promise<number> {
@@ -1876,6 +1938,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
   if (args.command === "doctor") return doctor(args);
+  if (args.command === "providers") return providersCommand();
   if (args.command === "config") return configCommand(args);
   if (args.command === "prompt") return promptCommand(args);
   if (args.command === "session") return sessionCommand(args);

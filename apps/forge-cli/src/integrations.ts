@@ -232,9 +232,15 @@ export async function validateExternalServerConfig(
     if (
       item.args !== undefined &&
       (!Array.isArray(item.args) ||
-        item.args.some((arg) => typeof arg !== "string"))
+        item.args.length > 64 ||
+        item.args.some(
+          (arg) =>
+            typeof arg !== "string" || arg.length > 4_096 || arg.includes("\0"),
+        ))
     )
-      errors.push(`servers[${index}].args must be an array of strings`);
+      errors.push(
+        `servers[${index}].args must contain at most 64 strings of 4096 safe characters`,
+      );
     if (item.enabled !== undefined && typeof item.enabled !== "boolean")
       errors.push(`servers[${index}].enabled must be boolean`);
     if (
@@ -256,14 +262,29 @@ export async function loadExternalServers(
   for (const value of parsed.servers) {
     if (!value || typeof value !== "object") continue;
     const item = value as Record<string, unknown>;
-    if (typeof item.id !== "string" || typeof item.command !== "string")
+    if (
+      typeof item.id !== "string" ||
+      typeof item.command !== "string" ||
+      item.command.length > 256 ||
+      item.command.includes("\0")
+    )
       continue;
+    const args = Array.isArray(item.args)
+      ? item.args
+          .filter(
+            (arg): arg is string =>
+              typeof arg === "string" &&
+              arg.length <= 4_096 &&
+              !arg.includes("\0"),
+          )
+          .slice(0, 64)
+      : [];
     const explicitConsent = item.explicitConsent === true;
     registry.register(
       {
         id: item.id,
         command: item.command,
-        args: Array.isArray(item.args) ? item.args.map(String) : [],
+        args,
         enabled: item.enabled === true,
         explicitConsent,
         trust: "untrusted",

@@ -203,6 +203,91 @@ class WorkerTests(unittest.TestCase):
             provider = build_provider()
         self.assertIsNone(provider.max_tokens)
 
+    def test_provider_presets_select_supported_endpoints_without_leaking_keys(self):
+        cases = [
+            ("openrouter", "OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"),
+            ("groq", "GROQ_API_KEY", "https://api.groq.com/openai/v1"),
+            ("gemini", "GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai"),
+            ("google-ai-studio", "GOOGLE_AI_STUDIO_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai"),
+            ("xai", "XAI_API_KEY", "https://api.x.ai/v1"),
+        ]
+        for name, key_name, base_url in cases:
+            with self.subTest(name=name), mock.patch.dict(os.environ, {"FORGE_PROVIDER": name, key_name: "provider-secret"}, clear=False):
+                provider = build_provider()
+            self.assertEqual(provider.base_url, base_url)
+            self.assertEqual(provider.api_key, "provider-secret")
+            self.assertNotIn("provider-secret", repr(provider.headers))
+        with mock.patch.dict(os.environ, {"FORGE_PROVIDER": "openrouter", "OPENROUTER_API_KEY": "provider-secret", "FORGE_BASE_URL": "https://proxy.invalid", "FORGE_MODEL": "custom/model"}, clear=False):
+            provider = build_provider()
+        self.assertEqual(provider.base_url, "https://proxy.invalid")
+        self.assertEqual(provider.model, "custom/model")
+
+    def test_provider_token_parameter_and_headers_are_bounded(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return b'{"choices":[{"message":{"content":"ok"}}]}'
+
+        def capture(model, token_parameter="auto", headers=None):
+            requests = []
+
+            def fake_urlopen(request, timeout):
+                del timeout
+                requests.append(request)
+                return Response()
+
+            provider = OpenAICompatibleProvider(
+                api_key="secret-key",
+                base_url="https://provider.invalid/v1",
+                model=model,
+                max_tokens=321,
+                max_retries=0,
+                token_parameter=token_parameter,
+                headers=headers,
+            )
+            with mock.patch("forge_agent.providers.urllib.request.urlopen", side_effect=fake_urlopen):
+                provider.complete(messages=[{"role": "user", "content": "ping"}], tools=[])
+            return requests[0]
+
+        gpt_body = json.loads(capture("gpt-5-mini").data)
+        self.assertEqual(gpt_body["max_completion_tokens"], 321)
+        self.assertNotIn("max_tokens", gpt_body)
+        gemini_body = json.loads(capture("gemini-2.0-flash").data)
+        self.assertEqual(gemini_body["max_tokens"], 321)
+        self.assertNotIn("max_completion_tokens", gemini_body)
+        explicit_body = json.loads(capture("gpt-5-mini", "max_tokens").data)
+        self.assertEqual(explicit_body["max_tokens"], 321)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "FORGE_PROVIDER": "openai-compatible",
+                "FORGE_API_KEY": "secret-key",
+                "FORGE_MODEL": "gpt-5-mini",
+                "FORGE_MAX_TOKENS": "321",
+                "FORGE_TOKEN_PARAMETER": "invalid",
+            },
+            clear=True,
+        ):
+            invalid_provider = build_provider()
+        self.assertEqual(invalid_provider.token_parameter, "auto")
+
+        request = capture("gpt-5-mini", headers={"X-OpenRouter-Title": "Forge CLI", "HTTP-Referer": "https://forge.example"})
+        header_names = {name.lower() for name in request.headers}
+        self.assertIn("x-openrouter-title", header_names)
+        self.assertIn("http-referer", header_names)
+        non_auth_headers = [
+            value
+            for name, value in request.header_items()
+            if name.lower() != "authorization"
+        ]
+        self.assertNotIn("secret-key", " ".join(non_auth_headers))
+        self.assertNotIn("secret-key", request.data.decode("utf-8"))
+
     def test_provider_errors_are_redacted(self):
         message = redact('api_key=sk-1234567890 secret=visible token=abc123')
         self.assertIn('api_key=[REDACTED]', message)

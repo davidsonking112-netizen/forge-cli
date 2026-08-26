@@ -697,6 +697,26 @@ test("MCP validator rejects actual NUL characters without launching servers", as
     const result = await validateExternalServerConfig(config);
     assert.equal(result.valid, false);
     assert.match(result.errors.join(" "), /command is invalid/);
+    await writeFile(
+      config,
+      JSON.stringify({
+        servers: [
+          {
+            id: "many",
+            command: "node",
+            args: Array.from({ length: 65 }, () => "x"),
+          },
+          { id: "large", command: "node", args: ["x".repeat(4_097)] },
+          { id: "nul", command: "node", args: ["bad\0arg"] },
+        ],
+      }),
+    );
+    const unsafeArgs = await validateExternalServerConfig(config);
+    assert.equal(unsafeArgs.valid, false);
+    assert.equal(
+      unsafeArgs.errors.filter((error) => /args/.test(error)).length,
+      3,
+    );
     await writeFile(config, "[]");
     const arrayRoot = await validateExternalServerConfig(config);
     assert.equal(arrayRoot.valid, false);
@@ -964,6 +984,16 @@ test("ACP JSON-RPC adapter normalizes events and preserves approval boundaries",
     ),
   );
   assert.equal(invalidParams.error.code, -32602);
+});
+
+test("ACP CLI stream rejects oversized input with a bounded exit", () => {
+  const cli = path.resolve("dist/apps/forge-cli/src/main.js");
+  const result = spawnSync(process.execPath, [cli, "acp", "serve"], {
+    input: `${"x".repeat(1_000_001)}\n`,
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /exceeds the 1000000-byte limit/);
 });
 
 test("external integrations require explicit enablement and normalize ACP events", () => {

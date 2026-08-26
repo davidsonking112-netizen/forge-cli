@@ -93,12 +93,17 @@ export class McpStdioClient {
     this.process.on("close", (code) =>
       this.rejectAll(new Error(`MCP server exited with code ${code ?? 1}`)),
     );
-    await this.request("initialize", {
-      protocolVersion: "2025-06-18",
-      capabilities: {},
-      clientInfo: { name: "forge-cli", version: "0.9.9" },
-    });
-    this.notify("notifications/initialized", {});
+    try {
+      await this.request("initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "forge-cli", version: "1.0.0" },
+      });
+      this.notify("notifications/initialized", {});
+    } catch (error) {
+      this.close();
+      throw error;
+    }
   }
 
   public async listTools(signal?: AbortSignal): Promise<McpToolDescriptor[]> {
@@ -154,8 +159,7 @@ export class McpStdioClient {
 
   public close(): void {
     this.closed = true;
-    for (const pending of this.pending.values()) clearTimeout(pending.timer);
-    this.pending.clear();
+    this.rejectAll(new McpClientError("MCP client closed", "cancelled"));
     this.process?.kill("SIGTERM");
     this.process = undefined;
   }
