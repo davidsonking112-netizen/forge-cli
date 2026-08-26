@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";

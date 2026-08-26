@@ -2,13 +2,25 @@
   "name": "forge-cli-workspace",
   "version": "0.9.9",
   "private": true,
-  "description": "Forge CLI development workspace",
+  "description": "Forge CLI development workspace and installable GitHub package",
+  "bin": {
+    "forge": "bin/forge.mjs"
+  },
+  "files": [
+    "bin/forge.mjs",
+    "dist/",
+    "python/forge_agent/",
+    "python/pyproject.toml",
+    "README.md",
+    "docs/ERROR_CODES.md"
+  ],
   "type": "module",
   "workspaces": [
     "apps/forge-cli",
     "packages/*"
   ],
   "scripts": {
+    "prepare": "npm run build",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test tests/*.test.mjs && python3 -m unittest discover -s python/tests -p 'test_*.py'",

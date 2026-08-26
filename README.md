@@ -15,6 +15,19 @@ Use `forge status` for a compact read-only summary of the current workspace, pro
 For scripts and CI, run `forge errors` for the versioned machine-readable contract.
 Exit code `0` means success, `1` means an attempted operation failed, `2` means usage or safety preconditions blocked execution, and `130` means the operator cancelled a run with Ctrl-C. Forge aborts active worker, subprocess, MCP, and Daytona boundaries where supported; it does not replay pending mutations. Do not parse human-readable messages as a stable API.
 
+## Install with npm from GitHub
+
+The public repository can be installed globally through npm without first cloning it. This installs the repository package, runs its safe build preparation step, and exposes the `forge` executable:
+
+```powershell
+npm install --global git+https://github.com/davidsonking112-netizen/forge-cli.git
+$env:FORGE_PYTHON = "python"
+forge init --workspace .
+forge status --workspace .
+```
+
+The GitHub source package is currently a development/release-candidate package rather than a registry-published `1.0.0` package. It still requires Node.js 22+ and Python 3.11+. API credentials remain environment-only; npm does not receive or store provider secrets. When a final registry package is approved, the package name, version, lockfile, and cross-platform distribution checks should be finalized before publishing.
+
 ## Development requirements
 
 - Node.js 22 or newer
