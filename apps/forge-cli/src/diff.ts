@@ -55,11 +55,21 @@ function parseHeaderPath(
 function parseHunkHeader(line: string): UnifiedHunk {
   const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
   if (!match) throw new Error("Malformed unified diff hunk header");
+  const values = [match[1], match[2] ?? "1", match[3], match[4] ?? "1"].map(
+    Number,
+  );
+  if (
+    values.some(
+      (value) =>
+        !Number.isSafeInteger(value) || value < 0 || value > MAX_DIFF_BYTES,
+    )
+  )
+    throw new Error("Unified diff hunk header is out of bounds");
   return {
-    oldStart: Number(match[1]),
-    oldCount: Number(match[2] ?? 1),
-    newStart: Number(match[3]),
-    newCount: Number(match[4] ?? 1),
+    oldStart: values[0]!,
+    oldCount: values[1]!,
+    newStart: values[2]!,
+    newCount: values[3]!,
     lines: [],
   };
 }
@@ -72,6 +82,7 @@ export function parseUnifiedDiff(diff: string): UnifiedFilePatch[] {
     throw new Error("Unified diff is empty or exceeds the 500000-byte limit");
   const lines = diff.replaceAll("\r\n", "\n").split("\n");
   const patches: UnifiedFilePatch[] = [];
+  const seenTargets = new Set<string>();
   let index = 0;
   while (index < lines.length) {
     if (lines[index] === "") {
@@ -91,13 +102,22 @@ export function parseUnifiedDiff(diff: string): UnifiedFilePatch[] {
         renameFrom = cleanPath(line.slice("rename from ".length)) ?? undefined;
       if (line.startsWith("rename to "))
         renameTo = cleanPath(line.slice("rename to ".length)) ?? undefined;
-      if (line.startsWith("Binary files "))
+      if (line.startsWith("Binary files ") || line === "GIT binary patch")
         throw new Error("Binary unified diffs are not supported");
       index += 1;
     }
+    if (
+      lines[index] === "GIT binary patch" ||
+      lines[index]?.startsWith("Binary files ")
+    )
+      throw new Error("Binary unified diffs are not supported");
     if (index >= lines.length) {
       if (!renameFrom || !renameTo)
         throw new Error("Unified diff is missing file headers");
+      const target = `${renameFrom}\u0000${renameTo}`;
+      if (seenTargets.has(target))
+        throw new Error("Unified diff contains duplicate file changes");
+      seenTargets.add(target);
       patches.push({
         oldPath: renameFrom,
         newPath: renameTo,
@@ -155,6 +175,10 @@ export function parseUnifiedDiff(diff: string): UnifiedFilePatch[] {
     }
     if (!oldPath && !newPath)
       throw new Error("Unified diff file has no target path");
+    const target = `${oldPath ?? ""}\u0000${newPath ?? ""}`;
+    if (seenTargets.has(target))
+      throw new Error("Unified diff contains duplicate file changes");
+    seenTargets.add(target);
     patches.push({
       oldPath,
       newPath,

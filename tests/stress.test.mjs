@@ -270,6 +270,26 @@ test("v0.5 CLI exposes safe review, ACP, policy, extension, MCP, and PR workflow
     );
     assert.equal(policy.status, 0);
     assert.match(policy.stdout, /\"id\": \"strict\"/);
+    const effective = spawnSync(
+      process.execPath,
+      [cli, "policy", "effective", policyFile],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      },
+    );
+    assert.equal(effective.status, 0);
+    assert.match(effective.stdout, /globalSafetyCeiling/);
+    const context = spawnSync(
+      process.execPath,
+      [cli, "context", "find relevant tests", "--workspace", root],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      },
+    );
+    assert.equal(context.status, 0);
+    assert.match(context.stdout, /relevantFiles/);
     const extensionDir = path.join(root, "extensions");
     await mkdir(extensionDir);
     await writeFile(

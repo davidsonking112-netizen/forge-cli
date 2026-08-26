@@ -42,13 +42,23 @@ export class AcpJsonlBridge {
     } catch {
       return this.error(null, -32700, "ACP message is not valid JSON");
     }
-    if (request.jsonrpc !== "2.0" || typeof request.method !== "string")
+    if (
+      request.jsonrpc !== "2.0" ||
+      typeof request.method !== "string" ||
+      (typeof request.id !== "string" && typeof request.id !== "number")
+    )
       return this.error(
         request.id ?? null,
         -32600,
-        "ACP request requires jsonrpc 2.0 and a method",
+        "ACP request requires jsonrpc 2.0, a method, and a string or numeric id",
       );
     try {
+      if (
+        request.params !== undefined &&
+        request.params !== null &&
+        (typeof request.params !== "object" || Array.isArray(request.params))
+      )
+        return this.error(request.id, -32602, "ACP params must be an object");
       const params =
         request.params && typeof request.params === "object"
           ? (request.params as Record<string, unknown>)
@@ -60,7 +70,11 @@ export class AcpJsonlBridge {
           : {}),
         ...(typeof params.prompt === "string" ? { prompt: params.prompt } : {}),
         ...(Array.isArray(params.files)
-          ? { files: params.files.map(String).slice(0, 100) }
+          ? {
+              files: params.files.every((file) => typeof file === "string")
+                ? params.files.slice(0, 100)
+                : [],
+            }
           : {}),
         ...(typeof params.status === "string" ? { status: params.status } : {}),
         ...(typeof params.reason === "string" ? { reason: params.reason } : {}),

@@ -1,6 +1,6 @@
 {
   "name": "forge-cli-workspace",
-  "version": "0.5.0",
+  "version": "0.5.5",
   "private": true,
   "description": "Forge CLI development workspace",
   "type": "module",

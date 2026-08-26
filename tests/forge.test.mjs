@@ -271,6 +271,27 @@ test("ACP JSON-RPC adapter normalizes events and preserves approval boundaries",
   assert.equal(unknown.error.code, -32602);
   const oversized = JSON.parse(bridge.handleLine("x".repeat(101)));
   assert.equal(oversized.error.code, -32600);
+  const missingId = JSON.parse(
+    bridge.handleLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "prompt",
+        params: { prompt: "inspect" },
+      }),
+    ),
+  );
+  assert.equal(missingId.error.code, -32600);
+  const invalidParams = JSON.parse(
+    bridge.handleLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 4,
+        method: "prompt",
+        params: "inspect",
+      }),
+    ),
+  );
+  assert.equal(invalidParams.error.code, -32602);
 });
 
 test("external integrations require explicit enablement and normalize ACP events", () => {
@@ -487,6 +508,35 @@ test("unified diff parser rejects stale context and unsafe paths", () => {
   );
 });
 
+test("unified diff rejects binary patches, duplicate entries, and oversized headers", () => {
+  assert.throws(
+    () => parseUnifiedDiff("diff --git a/a.bin b/a.bin\nGIT binary patch\n"),
+    /binary/i,
+  );
+  const duplicate = [
+    "diff --git a/app.txt b/app.txt",
+    "--- a/app.txt",
+    "+++ b/app.txt",
+    "@@ -1 +1 @@",
+    "-hello",
+    "+first",
+    "diff --git a/app.txt b/app.txt",
+    "--- a/app.txt",
+    "+++ b/app.txt",
+    "@@ -1 +1 @@",
+    "-hello",
+    "+second",
+  ].join("\n");
+  assert.throws(() => parseUnifiedDiff(duplicate), /duplicate/i);
+  assert.throws(
+    () =>
+      parseUnifiedDiff(
+        "diff --git a/app.txt b/app.txt\n--- a/app.txt\n+++ b/app.txt\n@@ -999999999,1 +1,1 @@\n-x\n+y\n",
+      ),
+    /bounds/i,
+  );
+});
+
 test("multi-file edits are transactional and checkpoints can be restored", async () => {
   const directory = await tempWorkspace();
   const checkpointDirectory = await mkdtemp(
@@ -545,6 +595,15 @@ test("supervisor applies a proposed change only after approval", async () => {
     });
     assert.equal(result.status, "completed");
     assert.deepEqual(result.changedFiles, ["generated.txt"]);
+    assert.ok(
+      result.sessionId &&
+        (await supervisor.readSession(result.sessionId)).events.some(
+          (event) =>
+            event.type === "approval.result" &&
+            event.category === "user" &&
+            event.decision === "approve-once",
+        ),
+    );
     assert.equal(
       await readFile(path.join(directory, "generated.txt"), "utf8"),
       "Created by Forge v0.1 mock agent.\n",
@@ -566,6 +625,12 @@ test("supervisor completes a mock read-only plan flow", async () => {
     });
     assert.equal(result.status, "completed");
     assert.ok(events.some((event) => event.type === "agent.plan"));
+    assert.ok(
+      events.some(
+        (event) =>
+          event.type === "approval.result" && event.category === "automatic",
+      ),
+    );
     assert.ok(
       events.some(
         (event) =>

@@ -6,7 +6,7 @@ The TypeScript/Node.js supervisor owns the command-line interface, terminal even
 
 ## Status
 
-Forge v0.5.0 is an active development release. It adds production-oriented unified-diff review and application, a local ACP JSON-RPC adapter, MCP trust-management commands, changed-file context prioritization, deny-only policy packs, extension-manifest validation, richer inspection reports, and structured local Git contribution drafts while retaining the local-first safety model.
+Forge v0.5.5 is a focused hardening release. It strengthens unified-diff edge-case validation, approval decision reporting, session observability, MCP/ACP reliability, changed-file context prioritization, deny-only policy packs, extension-manifest validation, and local Git contribution drafts while retaining the local-first safety model.
 
 ## Development requirements
 
@@ -75,7 +75,7 @@ forge apply-diff change.patch --workspace /path/to/repository
 
 MCP is opt-in per command. Configure servers in `~/.config/forge/integrations.json`, inspect them with `forge mcp list`, use `forge mcp enable <id>` or `forge mcp disable <id>` only after interactive approval, and use `forge mcp tools <id> --enable` for discovery. Calls use `forge mcp call <id> <tool> '{}' --enable` and require an interactive `YES` confirmation.
 
-Adapt local editor-style events through the ACP boundary with `printf '%s\\n' '{"jsonrpc":"2.0","id":1,"method":"prompt","params":{"prompt":"inspect"}}' | forge acp serve`. Validate a stricter policy pack with `forge policy validate policy.json`, load it for a run with `--policy-pack policy.json`, and inspect local extension manifests with `forge extensions list [directory]`.
+Adapt local editor-style events through the ACP boundary with `printf '%s\\n' '{"jsonrpc":"2.0","id":1,"method":"prompt","params":{"prompt":"inspect"}}' | forge acp serve`. Validate a stricter policy pack with `forge policy validate policy.json`, inspect the immutable ceiling with `forge policy effective policy.json`, load it for a run with `--policy-pack policy.json`, and inspect local extension manifests with `forge extensions list [directory]`. Use `forge context "find the relevant tests"` to inspect changed-file prioritization and the verification plan.
 
 ## Safety model
 

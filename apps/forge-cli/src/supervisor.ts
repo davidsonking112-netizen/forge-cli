@@ -127,6 +127,18 @@ export class ForgeSupervisor {
                 approvalMode = "session-approve";
             }
           }
+          const policyAllowed = policy.isAllowed(event.risk, event.tool);
+          await emit({
+            ...createEnvelope("approval.result", session.id),
+            type: "approval.result",
+            proposalId: event.id,
+            decision,
+            category: !needsApproval
+              ? "automatic"
+              : !policyAllowed
+                ? "policy"
+                : "user",
+          });
           if (decision === "cancel") {
             send(
               this.cancelEvent(
@@ -137,7 +149,7 @@ export class ForgeSupervisor {
             continue;
           }
           const result =
-            approved && policy.isAllowed(event.risk, event.tool)
+            approved && policyAllowed
               ? await tools.execute({
                   tool: event.tool,
                   arguments: event.arguments,

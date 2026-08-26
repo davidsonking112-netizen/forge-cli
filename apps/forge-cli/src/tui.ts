@@ -6,10 +6,12 @@ import type {
 export class FullScreenTui {
   private readonly lines: string[] = [];
   private active = false;
+  private readonly resizeHandler = (): void => this.draw();
 
   public start(): void {
     if (this.active) return;
     this.active = true;
+    process.stdout.on("resize", this.resizeHandler);
     process.stdout.write("\x1b[?1049h\x1b[2J\x1b[H");
     this.draw();
   }
@@ -17,6 +19,7 @@ export class FullScreenTui {
   public stop(): void {
     if (!this.active) return;
     this.active = false;
+    process.stdout.off("resize", this.resizeHandler);
     process.stdout.write("\x1b[?1049l");
   }
 
@@ -36,6 +39,10 @@ export class FullScreenTui {
       this.lines.push(`TOOL   ${event.tool} [${event.risk}]`);
     if (event.type === "tool.result")
       this.lines.push(`RESULT ${event.tool} ${event.ok ? "ok" : "failed"}`);
+    if (event.type === "approval.result")
+      this.lines.push(
+        `APPROVAL ${event.category ?? "user"} ${event.decision} (${event.proposalId.slice(0, 8)})`,
+      );
     if (event.type === "session.complete")
       this.lines.push(`DONE   ${event.status}: ${event.summary}`);
     if (event.type === "error")
@@ -54,7 +61,7 @@ export class FullScreenTui {
   private draw(): void {
     if (!this.active) return;
     const width = Math.max(40, Math.min(process.stdout.columns ?? 100, 120));
-    const title = ` Forge CLI v0.5 | ${"local-first coding agent".padEnd(width - 21, " ")} `;
+    const title = ` Forge CLI v0.5.5 | ${"local-first coding agent".padEnd(width - 21, " ")} `;
     process.stdout.write(
       `\x1b[2J\x1b[H\x1b[1;36m${title.slice(0, width)}\x1b[0m\n`,
     );

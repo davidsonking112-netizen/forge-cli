@@ -102,6 +102,7 @@ export interface ApprovalResultEvent extends BaseEvent {
   type: "approval.result";
   proposalId: string;
   decision: "approve-once" | "approve-session" | "deny" | "cancel";
+  category?: "automatic" | "user" | "policy";
 }
 
 export interface SessionCancelEvent extends BaseEvent {

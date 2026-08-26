@@ -9,6 +9,7 @@ import type {
   ToolProposalEvent,
 } from "../../../packages/protocol/src/index.js";
 import { ForgeSupervisor } from "./supervisor.js";
+import { buildRepositoryContext } from "./context.js";
 import { FullScreenTui } from "./tui.js";
 import { AcpJsonlBridge, loadExternalServers } from "./integrations.js";
 import { WorkspaceTools } from "./tools.js";
@@ -17,7 +18,7 @@ import { summarizeUnifiedDiff } from "./diff.js";
 import { loadPolicyPack } from "./policy.js";
 import { loadExtensionManifests } from "./extensions.js";
 
-const VERSION = "0.5.0";
+const VERSION = "0.5.5";
 
 function usage(): string {
   return `Forge CLI v${VERSION}
@@ -37,6 +38,8 @@ Usage:
   forge apply-diff <diff-file>            Apply a reviewed diff after approval
   forge acp serve                          Adapt local ACP JSON-RPC lines safely
   forge policy validate <file>             Validate a stricter local policy pack
+  forge policy effective [file]            Show the effective safety restrictions
+  forge context <prompt>                   Inspect selected context and checks
   forge extensions list [dir]              Validate local extension manifests
 
 Options:
@@ -76,6 +79,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     "apply-diff",
     "acp",
     "policy",
+    "context",
     "extensions",
     "git",
     "help",
@@ -481,6 +485,44 @@ async function gitCommand(args: ParsedArgs): Promise<number> {
   }
 }
 
+async function contextCommand(args: ParsedArgs): Promise<number> {
+  const prompt = args.positional.join(" ").trim();
+  if (!prompt) {
+    console.error("Usage: forge context <prompt> [--workspace <path>]");
+    return 2;
+  }
+  try {
+    const workspace = path.resolve(
+      flagString(args.flags, "workspace", process.cwd()),
+    );
+    const context = await buildRepositoryContext(workspace, prompt);
+    console.log(
+      JSON.stringify(
+        {
+          root: context.root,
+          projectType: context.projectType,
+          packageManager: context.packageManager,
+          changedFiles: context.changedFiles,
+          relevantFiles: context.relevantFiles.map(
+            ({ path: filePath, bytes, symbols }) => ({
+              path: filePath,
+              bytes,
+              symbols,
+            }),
+          ),
+          verificationCommands: context.verificationCommands,
+        },
+        null,
+        2,
+      ),
+    );
+    return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
 async function extensionsCommand(args: ParsedArgs): Promise<number> {
   if (args.positional[0] !== "list" && args.positional[0] !== undefined) {
     console.error("Usage: forge extensions list [directory]");
@@ -506,8 +548,37 @@ async function extensionsCommand(args: ParsedArgs): Promise<number> {
 }
 
 async function policyCommand(args: ParsedArgs): Promise<number> {
-  if (args.positional[0] !== "validate" || !args.positional[1]) {
-    console.error("Usage: forge policy validate <file>");
+  const action = args.positional[0];
+  if (action === "effective") {
+    try {
+      const pack = args.positional[1]
+        ? await loadPolicyPack(path.resolve(args.positional[1]))
+        : null;
+      console.log(
+        JSON.stringify(
+          {
+            globalSafetyCeiling: {
+              deniedRisks: ["destructive", "network", "credential-sensitive"],
+              deniedCapabilities: [
+                "unrestricted-autonomy",
+                "hidden-background-work",
+                "remote-push",
+              ],
+            },
+            policyPack: pack,
+          },
+          null,
+          2,
+        ),
+      );
+      return 0;
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      return 1;
+    }
+  }
+  if (action !== "validate" || !args.positional[1]) {
+    console.error("Usage: forge policy validate <file> | effective [file]");
     return 2;
   }
   try {
@@ -534,7 +605,12 @@ async function acpCommand(args: ParsedArgs): Promise<number> {
   const chunks: Buffer[] = [];
   for await (const chunk of input) chunks.push(Buffer.from(chunk));
   const inputText = Buffer.concat(chunks).toString("utf8");
-  for (const line of inputText.split(/\r?\n/)) {
+  const lines = inputText.split(/\r?\n/).filter((line) => line.trim());
+  if (lines.length > 200) {
+    console.error("ACP input exceeds the 200-request limit");
+    return 2;
+  }
+  for (const line of lines) {
     if (line.trim()) process.stdout.write(`${bridge.handleLine(line)}\n`);
   }
   return 0;
@@ -888,6 +964,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (args.command === "apply-diff") return diffCommand(args, true);
   if (args.command === "acp") return acpCommand(args);
   if (args.command === "policy") return policyCommand(args);
+  if (args.command === "context") return contextCommand(args);
   if (args.command === "extensions") return extensionsCommand(args);
   if (args.command === "git") return gitCommand(args);
   return runTask(args);

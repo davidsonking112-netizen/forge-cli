@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.5 — 2026-08-26
+
+Forge v0.5.5 hardens the unified-diff engine against binary patches, duplicate file entries, oversized hunk coordinates, stale context, unsafe paths, and mixed file operations. Review and application remain separate workflows, with transactional checkpoints and reversible changes.
+
+Approval events now identify automatic, user, and policy decisions. The TUI and session inspection surface these categories alongside tool timing, failures, delegation, and verification data. MCP lifecycle handling is hardened for repeated close and post-shutdown requests, while ACP and local interoperability boundaries remain bounded and explicit.
+
+The release adds regression coverage for diff edge cases and categorized approvals, updates the v0.5.5 version across Node.js, TypeScript, Python, and lockfile metadata, and retains the guidance-only doctor and deterministic release checks. Remote MCP transports, automatic pushes or pull requests, hidden background work, unrestricted autonomy, and executable third-party extensions remain deferred.
+
 ## 0.5.0 — 2026-08-26
 
 Forge v0.5 adds a bounded unified-diff editing and review engine. It validates diff headers, hunk counts, context lines, file existence, path containment, and stale content before applying changes. Modifications, additions, deletions, and renames use the existing checkpoint transaction and rollback boundary. `forge review` is read-only, while `forge apply-diff` requires an interactive approval.
