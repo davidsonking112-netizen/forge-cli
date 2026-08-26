@@ -40,7 +40,7 @@ import {
   readRepositoryIndex,
 } from "./index.js";
 
-const VERSION = "0.9.5";
+const VERSION = "0.9.7";
 
 function usage(): string {
   return `Forge CLI v${VERSION}
@@ -80,6 +80,7 @@ Options:
   --multi-agent          Enable bounded explorer/implementer/tester/reviewer delegation
   --max-agents <n>       Limit delegated specialist roles (default: 4)
   --max-total-turns <n>  Limit total delegated provider turns (default: 8)
+  --cost-profile <name>  Select economy|balanced|quality specialist budgets
   --no-record            Do not persist this session locally
   --policy-pack <file>   Load a deny-only policy pack for this run
   --profile <name>       Select a bounded autonomy profile
@@ -193,6 +194,14 @@ function renderEvent(event: ForgeEvent, json: boolean): void {
   switch (event.type) {
     case "agent.text":
       console.log(`\n${event.text}`);
+      break;
+    case "agent.checklist":
+      console.log("\nChecklist:");
+      event.items.forEach((item) =>
+        console.log(
+          `  ${item.status === "complete" ? "✓" : item.status === "active" ? "→" : item.status === "blocked" ? "!" : "-"} ${item.label} — ${item.expectation}${item.note ? ` (${item.note})` : ""}`,
+        ),
+      );
       break;
     case "agent.plan":
       console.log("\nPlan:");
@@ -518,6 +527,18 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
     const approvalCounts: Record<string, number> = {};
     const delegation: Array<{ role: string; status: string; turns: number }> =
       [];
+    let delegationBudget:
+      | {
+          profile: "economy" | "balanced" | "quality";
+          plannedRoles: number;
+          usedRoles: number;
+          plannedTurns: number;
+          usedTurns: number;
+          contextChars: number;
+          outputChars: number;
+          skippedRoles: string[];
+        }
+      | undefined;
     let checks: Array<{
       command: string;
       ok: boolean;
@@ -544,12 +565,14 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
       if (event.type === "approval.result")
         approvalCounts[event.decision] =
           (approvalCounts[event.decision] ?? 0) + 1;
-      if (event.type === "agent.delegation")
+      if (event.type === "agent.delegation") {
         delegation.push({
           role: event.role,
           status: event.status,
           turns: event.turns,
         });
+        if (event.budget) delegationBudget = event.budget;
+      }
       if (event.type === "session.complete")
         checks = event.checks.map((check) => ({
           command: check.command,
@@ -571,6 +594,7 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
           workspaceFingerprint: session.workspaceFingerprint,
           recovery: session.recovery,
           scratchpad: session.scratchpad,
+          checklist: session.checklist,
           plan: session.plan,
           journal: session.journal,
           verification: session.verification,
@@ -579,6 +603,7 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
           toolMetrics,
           approvalCounts,
           delegation,
+          delegationBudget: delegationBudget ?? null,
           checks,
         },
         null,
@@ -1333,6 +1358,9 @@ async function runTask(
   recovery?: RecoveryAssessment,
 ): Promise<number> {
   const isJson = flagString(args.flags, "output", "text") === "json";
+  const costProfile = flagString(args.flags, "cost-profile");
+  if (costProfile && !["economy", "balanced", "quality"].includes(costProfile))
+    throw new Error("--cost-profile must be economy, balanced, or quality");
   const workspace = path.resolve(
     flagString(args.flags, "workspace", process.cwd()),
   );
@@ -1404,14 +1432,26 @@ async function runTask(
       ...(args.flags["multi-agent"] === true
         ? {
             multiAgent: true,
-            maxAgents: boundedFlagInt(args.flags, "max-agents", 4, 1, 4),
-            maxTotalTurns: boundedFlagInt(
-              args.flags,
-              "max-total-turns",
-              8,
-              1,
-              16,
-            ),
+            ...(typeof args.flags["max-agents"] === "string"
+              ? { maxAgents: boundedFlagInt(args.flags, "max-agents", 4, 1, 4) }
+              : {}),
+            ...(typeof args.flags["max-total-turns"] === "string"
+              ? {
+                  maxTotalTurns: boundedFlagInt(
+                    args.flags,
+                    "max-total-turns",
+                    8,
+                    1,
+                    16,
+                  ),
+                }
+              : {}),
+            ...(costProfile
+              ? {
+                  costProfile: costProfile as
+                    "economy" | "balanced" | "quality",
+                }
+              : {}),
           }
         : {}),
       ...(args.flags["no-record"] === true ? { record: false } : {}),

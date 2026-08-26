@@ -1,10 +1,12 @@
 import type {
+  AgentChecklistEvent,
   ForgeEvent,
   ToolProposalEvent,
 } from "../../../packages/protocol/src/index.js";
 
 export class FullScreenTui {
   private readonly lines: string[] = [];
+  private checklist: AgentChecklistEvent["items"] = [];
   private active = false;
   private readonly resizeHandler = (): void => this.draw();
 
@@ -25,6 +27,7 @@ export class FullScreenTui {
 
   public handle(event: ForgeEvent): void {
     if (!this.active) return;
+    if (event.type === "agent.checklist") this.checklist = event.items;
     if (event.type === "agent.text") this.lines.push(`Forge  ${event.text}`);
     if (event.type === "agent.delegation")
       this.lines.push(
@@ -61,11 +64,31 @@ export class FullScreenTui {
   private draw(): void {
     if (!this.active) return;
     const width = Math.max(40, Math.min(process.stdout.columns ?? 100, 120));
-    const title = ` Forge CLI v0.9.5 | ${"local-first coding agent".padEnd(width - 21, " ")} `;
+    const title = ` Forge CLI v0.9.7 | ${"local-first coding agent".padEnd(width - 21, " ")} `;
     process.stdout.write(
       `\x1b[2J\x1b[H\x1b[1;36m${title.slice(0, width)}\x1b[0m\n`,
     );
     process.stdout.write(`${"─".repeat(width)}\n`);
+    if (this.checklist.length) {
+      process.stdout.write("Checklist:\n");
+      for (const item of this.checklist.slice(0, 24)) {
+        const marker =
+          item.status === "complete"
+            ? "✓"
+            : item.status === "active"
+              ? "→"
+              : item.status === "blocked"
+                ? "!"
+                : "-";
+        process.stdout.write(
+          `  ${marker} ${item.label}: ${item.expectation}${item.note ? ` (${item.note})` : ""}\n`.slice(
+            0,
+            width + 1,
+          ),
+        );
+      }
+      process.stdout.write(`${"─".repeat(width)}\n`);
+    }
     for (const line of this.lines)
       process.stdout.write(`${line.slice(0, width)}\n`);
     process.stdout.write(`\n${"─".repeat(width)}\n`);

@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type {
   CheckResult,
+  ChecklistItem,
   ForgeEvent,
   PlanStep,
   RecoveryAssessment,
@@ -45,6 +46,7 @@ export interface SessionRecord {
   workspaceFingerprint?: string;
   recovery?: RecoveryAssessment;
   scratchpad: ScratchpadItem[];
+  checklist: ChecklistItem[];
   plan?: PlanSnapshot;
   journal: StepJournalEntry[];
   verification: CheckResult[];
@@ -76,6 +78,7 @@ export class SessionStore {
       resumeCount: 0,
       journal: [],
       scratchpad: [],
+      checklist: [],
       verification: [],
       events: [],
     };
@@ -86,6 +89,7 @@ export class SessionStore {
   public async save(record: SessionRecord): Promise<void> {
     if (!Array.isArray(record.journal)) record.journal = [];
     if (!Array.isArray(record.scratchpad)) record.scratchpad = [];
+    if (!Array.isArray(record.checklist)) record.checklist = [];
     if (!Array.isArray(record.verification)) record.verification = [];
     if (!/^[0-9a-f-]{36}$/i.test(record.id))
       throw new Error("Invalid session ID");
@@ -104,6 +108,17 @@ export class SessionStore {
           status: ["todo", "active", "done", "blocked"].includes(item.status)
             ? item.status
             : "todo",
+        })),
+        checklist: record.checklist.slice(0, 64).map((item) => ({
+          id: String(item.id ?? "").slice(0, 100),
+          label: String(item.label ?? "").slice(0, 300),
+          expectation: String(item.expectation ?? "").slice(0, 500),
+          status: ["pending", "active", "complete", "blocked"].includes(
+            item.status,
+          )
+            ? item.status
+            : "pending",
+          ...(item.note ? { note: String(item.note).slice(0, 500) } : {}),
         })),
         verification: record.verification.slice(0, 32).map((check) => ({
           ...check,
@@ -160,6 +175,15 @@ export class SessionStore {
         key: item.key.slice(0, 100),
         value: item.value.slice(0, 1_000),
         status: item.status,
+      }));
+    }
+    if (sanitized.type === "agent.checklist") {
+      record.checklist = sanitized.items.slice(0, 64).map((item) => ({
+        id: item.id.slice(0, 100),
+        label: item.label.slice(0, 300),
+        expectation: item.expectation.slice(0, 500),
+        status: item.status,
+        ...(item.note ? { note: item.note.slice(0, 500) } : {}),
       }));
     }
     if (sanitized.type === "tool.proposal") {
@@ -302,6 +326,19 @@ export class SessionStore {
             status: ["todo", "active", "done", "blocked"].includes(item.status)
               ? item.status
               : "todo",
+          }))
+        : [],
+      checklist: Array.isArray(record.checklist)
+        ? record.checklist.slice(0, 64).map((item) => ({
+            id: String(item.id ?? "").slice(0, 100),
+            label: String(item.label ?? "").slice(0, 300),
+            expectation: String(item.expectation ?? "").slice(0, 500),
+            status: ["pending", "active", "complete", "blocked"].includes(
+              item.status,
+            )
+              ? item.status
+              : "pending",
+            ...(item.note ? { note: String(item.note).slice(0, 500) } : {}),
           }))
         : [],
       journal: Array.isArray(record.journal)

@@ -84,6 +84,19 @@ export interface AgentScratchpadEvent extends BaseEvent {
   items: ScratchpadItem[];
 }
 
+export interface ChecklistItem {
+  id: string;
+  label: string;
+  expectation: string;
+  status: "pending" | "active" | "complete" | "blocked";
+  note?: string;
+}
+
+export interface AgentChecklistEvent extends BaseEvent {
+  type: "agent.checklist";
+  items: ChecklistItem[];
+}
+
 export interface AgentDelegationEvent extends BaseEvent {
   type: "agent.delegation";
   role: "explorer" | "implementer" | "tester" | "reviewer";
@@ -91,6 +104,16 @@ export interface AgentDelegationEvent extends BaseEvent {
   turns: number;
   text: string;
   error?: string;
+  budget?: {
+    profile: "economy" | "balanced" | "quality";
+    plannedRoles: number;
+    usedRoles: number;
+    plannedTurns: number;
+    usedTurns: number;
+    contextChars: number;
+    outputChars: number;
+    skippedRoles: string[];
+  };
 }
 
 export interface AgentPlanEvent extends BaseEvent {
@@ -187,6 +210,7 @@ export type ForgeEvent =
   | UserPromptEvent
   | AgentTextEvent
   | AgentScratchpadEvent
+  | AgentChecklistEvent
   | AgentDelegationEvent
   | AgentPlanEvent
   | ToolProposalEvent
@@ -223,6 +247,15 @@ const protocolString = (value: unknown, maximum: number): value is string =>
   typeof value === "string" && value.length <= maximum && !value.includes("\0");
 const protocolArray = (value: unknown, maximum: number): value is unknown[] =>
   Array.isArray(value) && value.length <= maximum;
+const boundedInteger = (
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): value is number =>
+  typeof value === "number" &&
+  Number.isSafeInteger(value) &&
+  value >= minimum &&
+  value <= maximum;
 
 function validCheck(value: unknown): value is CheckResult {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -248,6 +281,22 @@ function validCheck(value: unknown): value is CheckResult {
       protocolString(check.toolVersion, 32)) &&
     (check.outputTruncated === undefined ||
       typeof check.outputTruncated === "boolean")
+  );
+}
+
+function validDelegationBudget(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const budget = value as Record<string, unknown>;
+  return (
+    ["economy", "balanced", "quality"].includes(String(budget.profile)) &&
+    boundedInteger(budget.plannedRoles, 0, 4) &&
+    boundedInteger(budget.usedRoles, 0, 4) &&
+    boundedInteger(budget.plannedTurns, 0, 32) &&
+    boundedInteger(budget.usedTurns, 0, 32) &&
+    boundedInteger(budget.contextChars, 0, 100_000) &&
+    boundedInteger(budget.outputChars, 0, 100_000) &&
+    protocolArray(budget.skippedRoles, 4) &&
+    budget.skippedRoles.every((role) => protocolString(role, 30))
   );
 }
 
@@ -321,6 +370,24 @@ export function isForgeEvent(value: unknown): value is ForgeEvent {
           );
         })
       );
+    case "agent.checklist":
+      return (
+        protocolArray(candidate.items, 64) &&
+        candidate.items.every((item) => {
+          if (!item || typeof item !== "object" || Array.isArray(item))
+            return false;
+          const entry = item as Record<string, unknown>;
+          return (
+            protocolString(entry.id, 100) &&
+            protocolString(entry.label, 300) &&
+            protocolString(entry.expectation, 500) &&
+            ["pending", "active", "complete", "blocked"].includes(
+              String(entry.status),
+            ) &&
+            (entry.note === undefined || protocolString(entry.note, 500))
+          );
+        })
+      );
     case "agent.delegation":
       return (
         ["explorer", "implementer", "tester", "reviewer"].includes(
@@ -333,7 +400,9 @@ export function isForgeEvent(value: unknown): value is ForgeEvent {
         candidate.turns <= 100 &&
         protocolString(candidate.text, 100_000) &&
         (candidate.error === undefined ||
-          protocolString(candidate.error, 2_000))
+          protocolString(candidate.error, 2_000)) &&
+        (candidate.budget === undefined ||
+          validDelegationBudget(candidate.budget))
       );
     case "agent.plan":
       return (

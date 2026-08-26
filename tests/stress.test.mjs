@@ -525,6 +525,8 @@ test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MC
       assert.match(inspection.stdout, /journal/);
       assert.match(inspection.stdout, /workspaceFingerprint/);
       assert.match(inspection.stdout, /scratchpad/);
+      assert.match(inspection.stdout, /checklist/);
+      assert.match(inspection.stdout, /delegationBudget/);
       const recovery = spawnSync(
         process.execPath,
         [cli, "session", "recovery", sessionId],

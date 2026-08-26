@@ -9,8 +9,8 @@ from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from forge_agent.orchestration import BoundedOrchestrator
-from forge_agent.providers import MockProvider, OpenAICompatibleProvider, ProviderReply, redact
-from forge_agent.worker import MockAgent, main, redact_error, verification_check
+from forge_agent.providers import MockProvider, OpenAICompatibleProvider, ProviderReply, build_provider, redact
+from forge_agent.worker import MockAgent, main, redact_error, selected_roles, verification_check
 
 
 class WorkerTests(unittest.TestCase):
@@ -60,15 +60,23 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(main(), 0)
         events = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertTrue(any(event["type"] == "agent.plan" for event in events))
+        checklists = [event for event in events if event["type"] == "agent.checklist"]
+        self.assertGreaterEqual(len(checklists), 3)
+        self.assertEqual(checklists[0]["items"][0]["status"], "active")
+        final_checklist = checklists[-1]["items"]
+        self.assertEqual(final_checklist[0]["status"], "complete")
+        self.assertEqual(final_checklist[4]["status"], "blocked")
         self.assertTrue(any(event["type"] == "session.complete" and event["status"] == "completed" for event in events))
 
     def test_orchestrator_is_bounded_and_sequential(self):
         class FakeProvider:
             def __init__(self):
                 self.calls = 0
+                self.requests = []
 
             def complete(self, *, messages, tools, on_text=None):
                 self.calls += 1
+                self.requests.append({"messages": messages, "tools": tools})
                 return ProviderReply(text=f"role response {self.calls}")
 
         provider = FakeProvider()
@@ -76,6 +84,9 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(provider.calls, 2)
         self.assertEqual([result.role for result in report.results], ["explorer", "implementer"])
         self.assertIn("role response 1", report.merged_summary)
+        self.assertEqual(provider.calls, 2)
+        self.assertTrue(all("Never spawn agents" in call["messages"][0]["content"] for call in provider.requests))
+        self.assertEqual([call["tools"] for call in provider.requests], [[], []])
 
     def test_worker_opt_in_multi_agent_flow_emits_delegations(self):
         output = io.StringIO()
@@ -86,7 +97,29 @@ class WorkerTests(unittest.TestCase):
         delegations = [event for event in events if event["type"] == "agent.delegation"]
         self.assertEqual(len(delegations), 2)
         self.assertTrue(all(event["status"] == "completed" for event in delegations))
+        self.assertTrue(all(event["budget"]["profile"] == "balanced" for event in delegations))
+        self.assertEqual(delegations[-1]["budget"]["usedRoles"], 2)
+        self.assertTrue(any(event["type"] == "agent.checklist" for event in events))
         self.assertTrue(any(event["type"] == "session.complete" for event in events))
+
+    def test_cost_scope_is_conservative_for_high_risk_goals(self):
+        self.assertEqual(selected_roles("summarize the repository", 2), ("explorer", "implementer"))
+        self.assertEqual(selected_roles("create a new file safely", 2), ("explorer", "implementer", "tester", "reviewer"))
+
+    def test_role_contracts_are_detailed_and_empty_output_fails_closed(self):
+        class EmptyProvider:
+            def complete(self, *, messages, tools, on_text=None):
+                self.messages = messages
+                self.tools = tools
+                return ProviderReply(text="")
+
+        provider = EmptyProvider()
+        report = BoundedOrchestrator(max_agents=1, max_total_turns=1).run(provider=provider, goal="inspect safely")
+        self.assertEqual(report.results[0].status, "failed")
+        self.assertIn("empty", report.results[0].error.lower())
+        self.assertEqual(provider.tools, [])
+        self.assertIn("evidence", provider.messages[1]["content"].lower())
+        self.assertIn("approval", provider.messages[0]["content"].lower())
 
     def test_failed_verification_reports_actual_evidence(self):
         agent = MockAgent("verification")
@@ -117,6 +150,15 @@ class WorkerTests(unittest.TestCase):
         )
         self.assertEqual(check["status"], "timed-out")
         self.assertEqual(check["workspaceFingerprint"], "b" * 64)
+
+    def test_provider_budget_environment_is_bounded(self):
+        with mock.patch.dict(os.environ, {"FORGE_PROVIDER": "openai-compatible", "FORGE_API_KEY": "test", "FORGE_MAX_TOKENS": "999999", "FORGE_PROVIDER_RETRIES": "999"}, clear=False):
+            provider = build_provider()
+        self.assertEqual(provider.max_tokens, 100_000)
+        self.assertEqual(provider.max_retries, 5)
+        with mock.patch.dict(os.environ, {"FORGE_PROVIDER": "openai-compatible", "FORGE_API_KEY": "test", "FORGE_MAX_TOKENS": "invalid"}, clear=False):
+            provider = build_provider()
+        self.assertIsNone(provider.max_tokens)
 
     def test_provider_errors_are_redacted(self):
         message = redact('api_key=sk-1234567890 secret=visible token=abc123')

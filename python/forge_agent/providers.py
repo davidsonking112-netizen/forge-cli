@@ -57,6 +57,20 @@ class MockProvider:
         return ProviderReply(text=text)
 
 
+def bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.isdigit():
+        return default
+    return max(minimum, min(maximum, int(raw)))
+
+
+def optional_bounded_env_int(name: str, minimum: int, maximum: int) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or not raw.isdigit():
+        return None
+    return max(minimum, min(maximum, int(raw)))
+
+
 def redact(text: str) -> str:
     text = re.sub(r"sk-[A-Za-z0-9_-]{4}[A-Za-z0-9_-]+", "sk-****[REDACTED]", text)
     return re.sub(r"(?i)(api[_-]?key|token|password|secret)\s*[:=]\s*[^,\s}]+", r"\1=[REDACTED]", text)
@@ -194,13 +208,13 @@ def build_provider() -> Provider:
     if provider_name in {"mock", "test"}:
         return MockProvider()
     if provider_name in {"openai", "openai-compatible", "compatible", "xai"}:
-        max_tokens = int(os.environ["FORGE_MAX_TOKENS"]) if os.environ.get("FORGE_MAX_TOKENS") else None
+        max_tokens = optional_bounded_env_int("FORGE_MAX_TOKENS", 256, 100_000)
         return OpenAICompatibleProvider(
             api_key=os.environ.get("FORGE_API_KEY") or os.environ.get("OPENAI_API_KEY", ""),
             base_url=os.environ.get("FORGE_BASE_URL", "https://api.openai.com/v1"),
             model=os.environ.get("FORGE_MODEL", "gpt-4.1-mini"),
             max_tokens=max_tokens,
             reasoning_effort=os.environ.get("FORGE_REASONING_EFFORT"),
-            max_retries=int(os.environ.get("FORGE_PROVIDER_RETRIES", "2")),
+            max_retries=bounded_env_int("FORGE_PROVIDER_RETRIES", 2, 0, 5),
         )
     raise ValueError(f"Unsupported FORGE_PROVIDER: {provider_name}")

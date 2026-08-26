@@ -145,6 +145,64 @@ test("v0.9 protocol validation rejects malformed and unbounded event data", () =
       ),
     /invalid|bound/i,
   );
+  const checklist = {
+    ...createEnvelope("agent.checklist", "session-1"),
+    type: "agent.checklist",
+    items: [
+      {
+        id: "inspect",
+        label: "Inspect repository",
+        expectation: "Relevant files are reviewed before mutation.",
+        status: "active",
+      },
+    ],
+  };
+  assert.equal(isForgeEvent(checklist), true);
+  assert.deepEqual(parseForgeEvent(JSON.stringify(checklist)), checklist);
+  assert.throws(
+    () =>
+      parseForgeEvent(
+        JSON.stringify({
+          ...checklist,
+          items: [
+            {
+              ...checklist.items[0],
+              expectation: "x".repeat(501),
+            },
+          ],
+        }),
+      ),
+    /invalid|bound/i,
+  );
+  const delegation = {
+    ...createEnvelope("agent.delegation", "session-1"),
+    type: "agent.delegation",
+    role: "reviewer",
+    status: "completed",
+    turns: 1,
+    text: "bounded review",
+    budget: {
+      profile: "balanced",
+      plannedRoles: 4,
+      usedRoles: 4,
+      plannedTurns: 8,
+      usedTurns: 4,
+      contextChars: 1200,
+      outputChars: 800,
+      skippedRoles: [],
+    },
+  };
+  assert.equal(isForgeEvent(delegation), true);
+  assert.throws(
+    () =>
+      parseForgeEvent(
+        JSON.stringify({
+          ...delegation,
+          budget: { ...delegation.budget, outputChars: 100_001 },
+        }),
+      ),
+    /invalid|bound/i,
+  );
 });
 
 test("v0.9 sessions persist journals and classify safe recovery decisions", async () => {
@@ -167,6 +225,8 @@ test("v0.9 sessions persist journals and classify safe recovery decisions", asyn
     assert.ok(record.journal.some((entry) => entry.status === "complete"));
     assert.ok(record.journal.some((entry) => entry.status === "pending"));
     assert.ok(record.scratchpad.some((item) => item.key === "current-step"));
+    assert.ok(record.checklist.some((item) => item.id === "inspect"));
+    assert.ok(record.checklist.some((item) => item.expectation.length > 0));
     const start = record.events.find((event) => event.type === "session.start");
     assert.equal(start?.type, "session.start");
     assert.equal(start?.workspaceFingerprint, record.workspaceFingerprint);

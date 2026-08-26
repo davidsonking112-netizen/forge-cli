@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.7 — 2026-08-26
+
+Forge v0.9.7 adds visible bounded planning checklists with user expectations at inspection, planning, approval, change, verification, and summary stages. Checklist events are validated, persisted with legacy-safe normalization, rendered in simple mode and the full-screen TUI, and exposed through `forge inspect`; they remain informational planning metadata and cannot authorize tools.
+
+Bounded specialist roles now use explicit explorer, implementer, tester, and reviewer contracts. Delegated providers receive no tools, cannot spawn agents or authorize actions, receive bounded context and prior-role handoff summaries, and fail closed on empty output. Cost profiles (`economy`, `balanced`, and `quality`) bound specialist scope, turns, context, and output; conservative risk detection retains tester and reviewer coverage for mutation-oriented goals. Delegation telemetry reports the selected profile, planned/used roles and turns, bounded context/output sizes, and skipped-role reasons without credentials or token values.
+
+The TypeScript supervisor remains the sole filesystem/process authority, writes and commands remain approval-gated, remote GitHub actions remain explicit, and the immutable global deny ceiling is unchanged.
+
 ## 0.9.5 — 2026-08-26
 
 Forge v0.9.5 adds explicit GitHub workflows: authentication-status inspection, user-controlled web login handoff, private-by-default repository creation from the approved workspace, bounded in-workspace cloning, and explicit branch pushes. Remote actions use only `gh` or `git` argument arrays, require interactive confirmation, minimize child environment, bound output/time, and never request or display GitHub credentials.
