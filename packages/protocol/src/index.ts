@@ -31,6 +31,15 @@ export interface BaseEvent {
   timestamp: string;
 }
 
+export type RecoveryDecision = "continue" | "re-plan" | "manual-intervention";
+
+export interface RecoveryAssessment {
+  sourceSessionId: string;
+  decision: RecoveryDecision;
+  stepId?: string;
+  reason: string;
+}
+
 export interface SessionStartEvent extends BaseEvent {
   type: "session.start";
   workspace: string;
@@ -41,6 +50,7 @@ export interface SessionStartEvent extends BaseEvent {
   prompt?: string;
   context?: unknown;
   workspaceFingerprint?: string;
+  recovery?: RecoveryAssessment;
 }
 
 export interface UserPromptEvent extends BaseEvent {
@@ -105,6 +115,7 @@ export interface ApprovalScope {
   argumentDigest: string;
   summary: string;
   expiresAt: string;
+  paths?: string[];
 }
 
 export interface ApprovalResultEvent extends BaseEvent {

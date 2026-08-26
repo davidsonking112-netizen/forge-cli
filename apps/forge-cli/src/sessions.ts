@@ -5,6 +5,7 @@ import type {
   CheckResult,
   ForgeEvent,
   PlanStep,
+  RecoveryAssessment,
 } from "../../../packages/protocol/src/index.js";
 
 export type SessionStatus =
@@ -41,6 +42,7 @@ export interface SessionRecord {
   status: SessionStatus;
   resumeCount: number;
   workspaceFingerprint?: string;
+  recovery?: RecoveryAssessment;
   plan?: PlanSnapshot;
   journal: StepJournalEntry[];
   verification: CheckResult[];
@@ -191,6 +193,15 @@ export class SessionStore {
       }
     }
     if (sanitized.type === "session.cancel") record.status = "cancelled";
+    await this.save(record);
+  }
+
+  public async setRecoveryAssessment(
+    record: SessionRecord,
+    assessment: RecoveryAssessment,
+  ): Promise<void> {
+    record.recovery = { ...assessment };
+    record.updatedAt = new Date().toISOString();
     await this.save(record);
   }
 

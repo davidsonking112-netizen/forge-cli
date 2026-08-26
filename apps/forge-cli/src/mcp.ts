@@ -2,6 +2,24 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { ExternalServer } from "./integrations.js";
 
+export type McpErrorCategory =
+  | "configuration"
+  | "transport"
+  | "timeout"
+  | "cancelled"
+  | "protocol"
+  | "server";
+
+export class McpClientError extends Error {
+  public constructor(
+    message: string,
+    public readonly category: McpErrorCategory,
+  ) {
+    super(message);
+    this.name = "McpClientError";
+  }
+}
+
 interface JsonRpcResponse {
   jsonrpc?: string;
   id?: string;
@@ -78,13 +96,13 @@ export class McpStdioClient {
     await this.request("initialize", {
       protocolVersion: "2025-06-18",
       capabilities: {},
-      clientInfo: { name: "forge-cli", version: "0.7.0" },
+      clientInfo: { name: "forge-cli", version: "0.8.0" },
     });
     this.notify("notifications/initialized", {});
   }
 
-  public async listTools(): Promise<McpToolDescriptor[]> {
-    const response = await this.request("tools/list", {});
+  public async listTools(signal?: AbortSignal): Promise<McpToolDescriptor[]> {
+    const response = await this.request("tools/list", {}, signal);
     const tools = (response.result as { tools?: unknown } | undefined)?.tools;
     if (!Array.isArray(tools)) return [];
     return tools.flatMap((value) => {
@@ -110,14 +128,28 @@ export class McpStdioClient {
   public async callTool(
     name: string,
     arguments_: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     if (!/^[a-zA-Z0-9_.:-]{1,128}$/.test(name))
       throw new Error("Invalid MCP tool name");
-    const response = await this.request("tools/call", {
-      name,
-      arguments: arguments_,
-    });
+    const response = await this.request(
+      "tools/call",
+      {
+        name,
+        arguments: arguments_,
+      },
+      signal,
+    );
     return response.result;
+  }
+
+  public cancelPending(reason = "MCP requests cancelled"): void {
+    for (const [id, pending] of this.pending.entries()) {
+      this.notify("notifications/cancelled", { requestId: id, reason });
+      clearTimeout(pending.timer);
+      pending.reject(new McpClientError(reason, "cancelled"));
+    }
+    this.pending.clear();
   }
 
   public close(): void {
@@ -137,9 +169,16 @@ export class McpStdioClient {
   private request(
     method: string,
     params: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<JsonRpcResponse> {
     if (!this.process || this.closed)
-      return Promise.reject(new Error("MCP client is not started"));
+      return Promise.reject(
+        new McpClientError("MCP client is not started", "configuration"),
+      );
+    if (signal?.aborted)
+      return Promise.reject(
+        new McpClientError("MCP request cancelled", "cancelled"),
+      );
     const id = `${++this.nextId}-${randomUUID()}`;
     this.process.stdin.write(
       `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`,
@@ -147,9 +186,31 @@ export class McpStdioClient {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`MCP request timed out: ${method}`));
+        reject(
+          new McpClientError(`MCP request timed out: ${method}`, "timeout"),
+        );
       }, this.timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      const onAbort = (): void => {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        this.notify("notifications/cancelled", {
+          requestId: id,
+          reason: "Client aborted the request",
+        });
+        reject(new McpClientError("MCP request cancelled", "cancelled"));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.pending.set(id, {
+        resolve: (value) => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
+        reject: (error) => {
+          signal?.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+        timer,
+      });
     });
   }
 
@@ -187,8 +248,9 @@ export class McpStdioClient {
     clearTimeout(pending.timer);
     if (response.error)
       pending.reject(
-        new Error(
+        new McpClientError(
           `MCP ${response.error.code ?? "error"}: ${response.error.message ?? "request failed"}`,
+          "server",
         ),
       );
     else pending.resolve(response);

@@ -6,9 +6,11 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import type {
   ForgeEvent,
+  RecoveryAssessment,
   ToolProposalEvent,
 } from "../../../packages/protocol/src/index.js";
 import { ForgeSupervisor } from "./supervisor.js";
+import type { SessionRecord } from "./sessions.js";
 import {
   buildRepositoryContext,
   fingerprintRepositoryContext,
@@ -32,10 +34,11 @@ import {
 import {
   buildRepositoryIndex,
   clearRepositoryIndex,
+  queryRepositoryIndex,
   readRepositoryIndex,
 } from "./index.js";
 
-const VERSION = "0.7.0";
+const VERSION = "0.8.0";
 
 function usage(): string {
   return `Forge CLI v${VERSION}
@@ -46,7 +49,7 @@ Usage:
   forge run --prompt <prompt>            Run a task with machine-readable output support
   forge doctor [--repair]                Check runtime; print safe repair guidance
   forge config show|path|set <key> <v>   Inspect or update local configuration
-  forge session list|resume|export|delete Manage local sessions
+  forge session list|recovery|resume|export|delete Manage local sessions
   forge verify <session-id>                 Inspect structured verification evidence
   forge undo <checkpoint-id>              Restore a Forge-managed checkpoint
   forge git status|branch|stage|commit    Use approval-gated local Git workflows
@@ -56,13 +59,14 @@ Usage:
   forge review <diff-file>                Inspect a unified diff without applying it
   forge preview-diff <diff-file>          Preview changes and report conflicts
   forge apply-diff <diff-file>            Apply a reviewed diff after approval
+                                        (use --only path[,path] for file-level review)
   forge acp serve                          Adapt local ACP JSON-RPC lines safely
   forge policy validate <file>             Validate a stricter local policy pack
   forge policy effective [file]            Show the effective safety restrictions
   forge policy explain <risk> [tool]       Explain an allow/approval/deny decision
   forge context <prompt>                   Inspect selected context and checks
   forge profiles                           List bounded autonomy profiles
-  forge index build|show|clear             Manage the opt-in local metadata index
+  forge index build|show|query|clear        Manage the opt-in local metadata index
   forge extensions list [dir]              Validate local extension manifests
 
 Options:
@@ -142,6 +146,24 @@ function flagString(
 ): string {
   const value = flags[key];
   return typeof value === "string" ? value : fallback;
+}
+
+function selectedDiffPaths(
+  flags: Record<string, string | boolean>,
+): string[] | undefined {
+  const raw = flagString(flags, "only");
+  if (!raw) return undefined;
+  const paths = [
+    ...new Set(
+      raw
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (!paths.length || paths.length > 100)
+    throw new Error("--only requires 1 to 100 comma-separated relative paths");
+  return paths;
 }
 
 export function boundedFlagInt(
@@ -288,6 +310,52 @@ async function configCommand(args: ParsedArgs): Promise<number> {
   return 2;
 }
 
+async function assessRecovery(
+  record: SessionRecord,
+  prompt: string,
+): Promise<RecoveryAssessment> {
+  const activeStep = record.journal.find(
+    (entry) =>
+      entry.status === "active" || entry.status === "awaiting-approval",
+  );
+  const nextStep =
+    activeStep ?? record.journal.find((entry) => entry.status === "pending");
+  let assessment: RecoveryAssessment = {
+    sourceSessionId: record.id,
+    decision: record.status === "completed" ? "re-plan" : "continue",
+    ...(nextStep ? { stepId: nextStep.stepId } : {}),
+    reason:
+      record.status === "completed"
+        ? "The source session completed; start a fresh bounded plan instead of replaying it."
+        : nextStep
+          ? `Continue from the recorded step: ${nextStep.description}`
+          : "No active step was recorded; create a fresh bounded plan.",
+  };
+  if (record.workspaceFingerprint) {
+    const currentContext = await buildRepositoryContext(
+      record.workspace,
+      prompt,
+    );
+    const currentFingerprint = fingerprintRepositoryContext(currentContext);
+    if (currentFingerprint !== record.workspaceFingerprint) {
+      return {
+        ...assessment,
+        decision: "manual-intervention",
+        reason:
+          "Workspace state changed since this session; inspect the changes and re-plan before resuming.",
+      };
+    }
+  } else {
+    assessment = {
+      ...assessment,
+      decision: "re-plan",
+      reason:
+        "This legacy session has no workspace fingerprint; begin a fresh bounded plan.",
+    };
+  }
+  return assessment;
+}
+
 async function sessionCommand(args: ParsedArgs): Promise<number> {
   const supervisor = new ForgeSupervisor();
   const action = args.positional[0] ?? "list";
@@ -313,33 +381,42 @@ async function sessionCommand(args: ParsedArgs): Promise<number> {
     console.log(JSON.stringify(record, null, 2));
     return 0;
   }
+  if (action === "recovery") {
+    const start = record.events.find((event) => event.type === "session.start");
+    if (!start || start.type !== "session.start" || !start.prompt) {
+      console.error(
+        "This session does not contain enough data for recovery assessment",
+      );
+      return 1;
+    }
+    const assessment = await assessRecovery(record, start.prompt);
+    console.log(JSON.stringify(assessment, null, 2));
+    return assessment.decision === "manual-intervention" ? 2 : 0;
+  }
   if (action === "resume") {
     const start = record.events.find((event) => event.type === "session.start");
     if (!start || start.type !== "session.start" || !start.prompt) {
       console.error("This session does not contain a resumable prompt");
       return 1;
     }
-    if (record.workspaceFingerprint) {
-      const currentContext = await buildRepositoryContext(
-        record.workspace,
-        start.prompt,
-      );
-      const currentFingerprint = fingerprintRepositoryContext(currentContext);
-      if (currentFingerprint !== record.workspaceFingerprint) {
-        console.error(
-          "Workspace state changed since this session; inspect and re-plan before resuming.",
-        );
-        return 2;
-      }
+    const assessment = await assessRecovery(record, start.prompt);
+    if (assessment.decision === "manual-intervention") {
+      await supervisor.setRecoveryAssessment(record.id, assessment);
+      console.error(assessment.reason);
+      return 2;
     }
+    await supervisor.setRecoveryAssessment(record.id, assessment);
     await supervisor.markSessionResumed(record.id);
-    return runTask({
-      command: "interactive",
-      positional: [start.prompt],
-      flags: { workspace: record.workspace },
-    });
+    return runTask(
+      {
+        command: "interactive",
+        positional: [start.prompt],
+        flags: { workspace: record.workspace },
+      },
+      assessment,
+    );
   }
-  console.error("Usage: forge session list|resume|export|delete <id>");
+  console.error("Usage: forge session list|recovery|resume|export|delete <id>");
   return 2;
 }
 
@@ -457,6 +534,7 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
           status: session.status,
           resumeCount: session.resumeCount,
           workspaceFingerprint: session.workspaceFingerprint,
+          recovery: session.recovery,
           plan: session.plan,
           journal: session.journal,
           verification: session.verification,
@@ -600,6 +678,7 @@ async function indexCommand(args: ParsedArgs): Promise<number> {
             version: index.version,
             root: index.root,
             files: index.files.length,
+            relationships: index.relationships.length,
             scan: index.scan,
             updatedAt: index.updatedAt,
           },
@@ -615,6 +694,12 @@ async function indexCommand(args: ParsedArgs): Promise<number> {
       );
       return 0;
     }
+    if (action === "query") {
+      const query = args.positional.slice(1).join(" ").trim();
+      const index = await readRepositoryIndex(workspace);
+      console.log(JSON.stringify(queryRepositoryIndex(index, query), null, 2));
+      return 0;
+    }
     if (action === "clear") {
       await clearRepositoryIndex(workspace);
       console.log(
@@ -622,7 +707,9 @@ async function indexCommand(args: ParsedArgs): Promise<number> {
       );
       return 0;
     }
-    console.error("Usage: forge index build|show|clear [--workspace <path>]");
+    console.error(
+      "Usage: forge index build|show|query <term>|clear [--workspace <path>]",
+    );
     return 2;
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
@@ -841,6 +928,7 @@ async function previewDiffCommand(args: ParsedArgs): Promise<number> {
     );
     const preview = await new WorkspaceTools(workspace).previewUnifiedDiff(
       diff,
+      selectedDiffPaths(args.flags),
     );
     console.log(JSON.stringify(preview, null, 2));
     return preview.safeToApply ? 0 : 1;
@@ -868,8 +956,9 @@ async function diffCommand(args: ParsedArgs, apply: boolean): Promise<number> {
     const workspace = path.resolve(
       flagString(args.flags, "workspace", process.cwd()),
     );
+    const selectedPaths = selectedDiffPaths(args.flags);
     const tools = new WorkspaceTools(workspace);
-    const preview = await tools.previewUnifiedDiff(diff);
+    const preview = await tools.previewUnifiedDiff(diff, selectedPaths);
     if (!preview.safeToApply) {
       console.log(JSON.stringify({ mode: "apply", summary, preview }, null, 2));
       return 1;
@@ -895,7 +984,10 @@ async function diffCommand(args: ParsedArgs, apply: boolean): Promise<number> {
     }
     const result = await tools.execute({
       tool: "workspace.apply_unified_diff",
-      arguments: { diff },
+      arguments: {
+        diff,
+        ...(selectedPaths ? { paths: selectedPaths } : {}),
+      },
     });
     console.log(JSON.stringify(result.output ?? result.error, null, 2));
     return result.ok ? 0 : 1;
@@ -1100,7 +1192,10 @@ async function undoCommand(args: ParsedArgs): Promise<number> {
   }
 }
 
-async function runTask(args: ParsedArgs): Promise<number> {
+async function runTask(
+  args: ParsedArgs,
+  recovery?: RecoveryAssessment,
+): Promise<number> {
   const isJson = flagString(args.flags, "output", "text") === "json";
   const workspace = path.resolve(
     flagString(args.flags, "workspace", process.cwd()),
@@ -1134,18 +1229,23 @@ async function runTask(args: ParsedArgs): Promise<number> {
           tui?.showApproval(proposal);
           const answer = (
             await rl.question(
-              `Approve ${proposal.tool}? [y]es/[s]ession/[n]o/[c]ancel: `,
+              `Approve ${proposal.tool}? [y]es/[s]ession/[n]o/[r]evoke/[c]ancel: `,
             )
           )
             .trim()
             .toLowerCase();
           if (answer === "y" || answer === "yes") return "approve-once";
           if (answer === "s" || answer === "session") return "approve-session";
+          if (answer === "r" || answer === "revoke") {
+            revokeApprovalScope = true;
+            return "deny";
+          }
           if (answer === "c" || answer === "cancel") return "cancel";
           return "deny";
         }
       : undefined;
   const supervisor = new ForgeSupervisor();
+  let revokeApprovalScope = false;
   try {
     const policyPackPath = flagString(args.flags, "policy-pack");
     const profileName = flagString(args.flags, "profile");
@@ -1183,6 +1283,12 @@ async function runTask(args: ParsedArgs): Promise<number> {
       ...(autonomyProfile
         ? { autonomyProfile: autonomyProfile as AutonomyProfileName }
         : {}),
+      ...(recovery ? { recovery } : {}),
+      revokeApprovalScope: () => {
+        const revoked = revokeApprovalScope;
+        revokeApprovalScope = false;
+        return revoked;
+      },
     };
     const result = await supervisor.run(runOptions);
     return result.status === "completed" ? 0 : 1;

@@ -27,6 +27,7 @@ export interface ToolMetadata {
 
 export interface UnifiedDiffPreviewFile {
   path: string;
+  selected: boolean;
   action: "create" | "modify" | "delete" | "rename";
   currentSha256: string | null;
   bytesBefore: number;
@@ -36,7 +37,7 @@ export interface UnifiedDiffPreviewFile {
 
 export interface UnifiedDiffPreview {
   safeToApply: boolean;
-  summary: { files: number; hunks: number };
+  summary: { files: number; selectedFiles: number; hunks: number };
   files: UnifiedDiffPreviewFile[];
   conflicts: string[];
 }
@@ -173,16 +174,25 @@ export class WorkspaceTools {
     this.checkpointRoot = checkpointRoot;
   }
 
-  public async previewUnifiedDiff(diff: string): Promise<UnifiedDiffPreview> {
+  public async previewUnifiedDiff(
+    diff: string,
+    selectedPaths?: string[],
+  ): Promise<UnifiedDiffPreview> {
     if (typeof diff !== "string")
       throw new Error("Unified diff requires string diff content");
     const patches = parseUnifiedDiff(diff);
+    const selection = selectedPaths?.length ? new Set(selectedPaths) : null;
     const files: UnifiedDiffPreviewFile[] = [];
     const conflicts: string[] = [];
     for (const patch of patches) {
       const oldTarget = patch.oldPath ? this.resolveSafe(patch.oldPath) : null;
       const newTarget = patch.newPath ? this.resolveSafe(patch.newPath) : null;
       const displayPath = patch.newPath ?? patch.oldPath;
+      const selected =
+        selection === null ||
+        [patch.oldPath, patch.newPath].some(
+          (candidate) => candidate !== null && selection.has(candidate),
+        );
       if (!displayPath || (!oldTarget && !newTarget))
         throw new Error("Unified diff has no target path");
       const previous = oldTarget
@@ -228,9 +238,10 @@ export class WorkspaceTools {
           conflict = error instanceof Error ? error.message : String(error);
         }
       }
-      if (conflict) conflicts.push(conflict);
+      if (conflict && selected) conflicts.push(conflict);
       files.push({
         path: displayPath,
+        selected,
         action,
         currentSha256: previous
           ? createHash("sha256").update(previous).digest("hex")
@@ -242,6 +253,7 @@ export class WorkspaceTools {
       if (action === "rename")
         files.push({
           path: patch.newPath as string,
+          selected,
           action: "rename",
           currentSha256: destination
             ? createHash("sha256").update(destination).digest("hex")
@@ -255,6 +267,7 @@ export class WorkspaceTools {
       safeToApply: conflicts.length === 0,
       summary: {
         files: patches.length,
+        selectedFiles: files.filter((file) => file.selected).length,
         hunks: patches.reduce((count, patch) => count + patch.hunks.length, 0),
       },
       files,
@@ -562,6 +575,19 @@ export class WorkspaceTools {
     if (typeof diff !== "string")
       throw new Error("Unified diff requires string diff content");
     const patches = parseUnifiedDiff(diff);
+    const selectedPaths = Array.isArray(args.paths)
+      ? args.paths.map(String)
+      : undefined;
+    const selection = selectedPaths?.length ? new Set(selectedPaths) : null;
+    const selectedPatches = selection
+      ? patches.filter((patch) =>
+          [patch.oldPath, patch.newPath].some(
+            (candidate) => candidate !== null && selection.has(candidate),
+          ),
+        )
+      : patches;
+    if (!selectedPatches.length)
+      throw new Error("No unified-diff files matched the selected paths");
     const changes: Array<{
       relativePath: string;
       target: string;
@@ -569,7 +595,7 @@ export class WorkspaceTools {
       originalSha256: string | null;
       delete: boolean;
     }> = [];
-    for (const patch of patches) {
+    for (const patch of selectedPatches) {
       const oldTarget = patch.oldPath ? this.resolveSafe(patch.oldPath) : null;
       const newTarget = patch.newPath ? this.resolveSafe(patch.newPath) : null;
       if (!newTarget && !oldTarget)
@@ -639,8 +665,11 @@ export class WorkspaceTools {
     return {
       ...applied,
       summary: {
-        files: patches.length,
-        hunks: patches.reduce((count, patch) => count + patch.hunks.length, 0),
+        files: selectedPatches.length,
+        hunks: selectedPatches.reduce(
+          (count, patch) => count + patch.hunks.length,
+          0,
+        ),
       },
     };
   }

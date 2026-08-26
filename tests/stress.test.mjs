@@ -177,6 +177,32 @@ test("MCP stdio client initializes, discovers tools, calls safely, and closes", 
   }
 });
 
+test("MCP requests support explicit AbortSignal cancellation", async () => {
+  const serverScript =
+    "process.stdin.setEncoding('utf8'); let buffer=''; process.stdin.on('data', chunk => { buffer += chunk; for (const line of buffer.split('\\n').slice(0, -1)) { const request = JSON.parse(line); if (request.id && request.method === 'initialize') process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:request.id,result:{protocolVersion:'2025-06-18',capabilities:{}}})+'\\n'); } buffer = buffer.slice(buffer.lastIndexOf('\\n') + 1); });";
+  const client = new McpStdioClient(
+    {
+      id: "cancel-fixture",
+      command: process.execPath,
+      args: ["-e", serverScript],
+      enabled: true,
+      explicitConsent: true,
+      trust: "untrusted",
+      defaultRisk: "network",
+    },
+    3000,
+  );
+  const controller = new AbortController();
+  try {
+    await client.start();
+    const pending = client.callTool("local.echo", {}, controller.signal);
+    setTimeout(() => controller.abort(), 25);
+    await assert.rejects(pending, (error) => error?.category === "cancelled");
+  } finally {
+    client.close();
+  }
+});
+
 test("no-record supervisor runs do not persist session data", async () => {
   const root = await fixture();
   const state = await mkdtemp(path.join(os.tmpdir(), "forge-no-record-state-"));
@@ -198,7 +224,7 @@ test("no-record supervisor runs do not persist session data", async () => {
   }
 });
 
-test("v0.7 CLI exposes recovery, preview, verification, policy, extension, MCP, and PR workflows", async () => {
+test("v0.8 CLI exposes recovery, change-set, verification, policy, extension, MCP, and PR workflows", async () => {
   const root = await fixture();
   try {
     const config = path.join(root, "integrations.json");
@@ -229,7 +255,14 @@ test("v0.7 CLI exposes recovery, preview, verification, policy, extension, MCP, 
       { cwd: process.cwd(), encoding: "utf8", env: indexEnv },
     );
     assert.equal(indexShow.status, 0);
-    assert.match(indexShow.stdout, /\"files\"/);
+    assert.match(indexShow.stdout, /"files"/);
+    const indexQuery = spawnSync(
+      process.execPath,
+      [cli, "index", "query", "fixture", "--workspace", root],
+      { cwd: process.cwd(), encoding: "utf8", env: indexEnv },
+    );
+    assert.equal(indexQuery.status, 0);
+    assert.match(indexQuery.stdout, /entries/);
     const indexClear = spawnSync(
       process.execPath,
       [cli, "index", "clear", "--workspace", root],
@@ -316,7 +349,22 @@ test("v0.7 CLI exposes recovery, preview, verification, policy, extension, MCP, 
     );
     assert.equal(preview.status, 0);
     assert.match(preview.stdout, /\"safeToApply\": true/);
-    assert.match(preview.stdout, /\"action\": \"modify\"/);
+    assert.match(preview.stdout, /"action": "modify"/);
+    const selectedPreview = spawnSync(
+      process.execPath,
+      [
+        cli,
+        "preview-diff",
+        diffFile,
+        "--workspace",
+        root,
+        "--only",
+        "README.md",
+      ],
+      { cwd: process.cwd(), encoding: "utf8" },
+    );
+    assert.equal(selectedPreview.status, 0);
+    assert.match(selectedPreview.stdout, /"selected": true/);
     const acp = spawnSync(process.execPath, [cli, "acp", "serve"], {
       cwd: process.cwd(),
       input:
@@ -329,7 +377,8 @@ test("v0.7 CLI exposes recovery, preview, verification, policy, extension, MCP, 
       encoding: "utf8",
     });
     assert.equal(acp.status, 0);
-    assert.match(acp.stdout, /\"approvalRequired\":true/);
+    assert.match(acp.stdout, /"approvalRequired":true/);
+    assert.match(acp.stdout, /"correlationId":1/);
     const policyFile = path.join(root, "policy.json");
     await writeFile(
       policyFile,
@@ -450,6 +499,17 @@ test("v0.7 CLI exposes recovery, preview, verification, policy, extension, MCP, 
       assert.equal(inspection.status, 0);
       assert.match(inspection.stdout, /journal/);
       assert.match(inspection.stdout, /workspaceFingerprint/);
+      const recovery = spawnSync(
+        process.execPath,
+        [cli, "session", "recovery", sessionId],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+          env: { ...process.env, XDG_STATE_HOME: planState },
+        },
+      );
+      assert.equal(recovery.status, 0);
+      assert.match(recovery.stdout, /re-plan|continue/);
       const verification = spawnSync(
         process.execPath,
         [cli, "verify", sessionId],

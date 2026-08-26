@@ -11,6 +11,9 @@ export interface ExternalServer {
   defaultRisk: RiskClass;
 }
 
+export type AcpErrorCategory =
+  "parse" | "invalid-request" | "invalid-params" | "unsupported-event";
+
 export interface AcpEvent {
   type:
     "workspace.open" | "prompt" | "edit.proposal" | "verification" | "cancel";
@@ -19,6 +22,7 @@ export interface AcpEvent {
   files?: string[];
   status?: string;
   reason?: string;
+  correlationId?: string | number;
 }
 
 export interface AcpJsonRpcRequest {
@@ -35,12 +39,17 @@ export class AcpJsonlBridge {
 
   public handleLine(line: string): string {
     if (Buffer.byteLength(line, "utf8") > this.maxLineBytes)
-      return this.error(null, -32600, "ACP message exceeds the size limit");
+      return this.error(
+        null,
+        -32600,
+        "ACP message exceeds the size limit",
+        "invalid-request",
+      );
     let request: AcpJsonRpcRequest;
     try {
       request = JSON.parse(line) as AcpJsonRpcRequest;
     } catch {
-      return this.error(null, -32700, "ACP message is not valid JSON");
+      return this.error(null, -32700, "ACP message is not valid JSON", "parse");
     }
     if (
       request.jsonrpc !== "2.0" ||
@@ -51,6 +60,7 @@ export class AcpJsonlBridge {
         request.id ?? null,
         -32600,
         "ACP request requires jsonrpc 2.0, a method, and a string or numeric id",
+        "invalid-request",
       );
     try {
       if (
@@ -58,7 +68,12 @@ export class AcpJsonlBridge {
         request.params !== null &&
         (typeof request.params !== "object" || Array.isArray(request.params))
       )
-        return this.error(request.id, -32602, "ACP params must be an object");
+        return this.error(
+          request.id,
+          -32602,
+          "ACP params must be an object",
+          "invalid-params",
+        );
       const params =
         request.params && typeof request.params === "object"
           ? (request.params as Record<string, unknown>)
@@ -78,19 +93,25 @@ export class AcpJsonlBridge {
           : {}),
         ...(typeof params.status === "string" ? { status: params.status } : {}),
         ...(typeof params.reason === "string" ? { reason: params.reason } : {}),
+        ...(request.id === undefined ? {} : { correlationId: request.id }),
       });
       const approvalRequired =
         event.type === "edit.proposal" || event.type === "verification";
       return JSON.stringify({
         jsonrpc: "2.0",
         id: request.id ?? null,
-        result: { event, approvalRequired },
+        result: {
+          event,
+          approvalRequired,
+          correlationId: request.id,
+        },
       });
     } catch (error) {
       return this.error(
         request.id ?? null,
         -32602,
         error instanceof Error ? error.message : String(error),
+        "unsupported-event",
       );
     }
   }
@@ -99,8 +120,13 @@ export class AcpJsonlBridge {
     id: string | number | null,
     code: number,
     message: string,
+    category: AcpErrorCategory,
   ): string {
-    return JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } });
+    return JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      error: { code, message, data: { category } },
+    });
   }
 }
 

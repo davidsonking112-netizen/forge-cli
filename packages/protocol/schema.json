@@ -39,6 +39,19 @@
           "workspaceFingerprint": {
             "type": "string",
             "pattern": "^[a-f0-9]{64}$"
+          },
+          "recovery": {
+            "type": "object",
+            "required": ["sourceSessionId", "decision", "reason"],
+            "properties": {
+              "sourceSessionId": { "type": "string", "minLength": 1 },
+              "decision": {
+                "enum": ["continue", "re-plan", "manual-intervention"]
+              },
+              "stepId": { "type": "string", "minLength": 1 },
+              "reason": { "type": "string", "maxLength": 500 }
+            },
+            "additionalProperties": false
           }
         }
       }
@@ -99,7 +112,12 @@
                 "pattern": "^[a-f0-9]{64}$"
               },
               "summary": { "type": "string", "maxLength": 200 },
-              "expiresAt": { "type": "string", "format": "date-time" }
+              "expiresAt": { "type": "string", "format": "date-time" },
+              "paths": {
+                "type": "array",
+                "maxItems": 100,
+                "items": { "type": "string", "maxLength": 500 }
+              }
             },
             "additionalProperties": false
           }

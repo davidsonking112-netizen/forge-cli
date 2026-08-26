@@ -12,6 +12,7 @@ import {
   type PolicyMode,
   type RiskClass,
   type ApprovalScope,
+  type RecoveryAssessment,
   type ToolName,
   type ToolProposalEvent,
   type ToolResultEvent,
@@ -37,6 +38,8 @@ export interface RunOptions {
   record?: boolean;
   policyPack?: PolicyPack;
   autonomyProfile?: AutonomyProfileName;
+  recovery?: RecoveryAssessment;
+  revokeApprovalScope?: () => boolean;
   onEvent?: (event: ForgeEvent) => void;
   approve?: (
     proposal: ToolProposalEvent,
@@ -48,6 +51,26 @@ export interface RunResult {
   status: "completed" | "failed" | "cancelled";
   summary: string;
   changedFiles: string[];
+}
+
+function extractScopePaths(arguments_: Record<string, unknown>): string[] {
+  const values: string[] = [];
+  const add = (value: unknown): void => {
+    if (
+      typeof value === "string" &&
+      value.length <= 500 &&
+      !path.isAbsolute(value)
+    )
+      values.push(value.replaceAll("\\", "/"));
+    else if (Array.isArray(value)) value.slice(0, 100).forEach(add);
+  };
+  add(arguments_.path);
+  add(arguments_.paths);
+  if (Array.isArray(arguments_.files))
+    for (const file of arguments_.files.slice(0, 100))
+      if (file && typeof file === "object")
+        add((file as Record<string, unknown>).path);
+  return [...new Set(values)].slice(0, 100);
 }
 
 export class ForgeSupervisor {
@@ -150,6 +173,10 @@ export class ForgeSupervisor {
         }
         await emit(event);
         if (event.type === "tool.proposal") {
+          if (options.revokeApprovalScope?.()) {
+            approvalMode = "safe";
+            approvalScope = undefined;
+          }
           const metadata = TOOL_METADATA[event.tool];
           const needsApproval = metadata
             ? policy.requiresApproval(event.risk)
@@ -257,6 +284,7 @@ export class ForgeSupervisor {
       prompt: options.prompt,
       context: repositoryContext,
       workspaceFingerprint,
+      ...(options.recovery ? { recovery: options.recovery } : {}),
     };
     await emit(startEvent);
     send(startEvent);
@@ -288,6 +316,14 @@ export class ForgeSupervisor {
   public async markSessionResumed(id: string): Promise<void> {
     const record = await this.sessions.read(id);
     await this.sessions.incrementResume(record);
+  }
+
+  public async setRecoveryAssessment(
+    id: string,
+    assessment: RecoveryAssessment,
+  ): Promise<void> {
+    const record = await this.sessions.read(id);
+    await this.sessions.setRecoveryAssessment(record, assessment);
   }
 
   public async removeSession(id: string): Promise<void> {
@@ -361,11 +397,13 @@ export class ForgeSupervisor {
 
   private createApprovalScope(proposal: ToolProposalEvent): ApprovalScope {
     const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
+    const paths = extractScopePaths(proposal.arguments);
     return {
       tool: proposal.tool as ToolName,
       argumentDigest: this.argumentDigest(proposal.arguments),
       summary: `Exact arguments for ${proposal.tool}; expires in 15 minutes`,
       expiresAt,
+      ...(paths.length ? { paths } : {}),
     };
   }
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0 — 2026-08-26
+
+Forge v0.8 adds deterministic step-aware recovery assessment through `forge session recovery`, persisted recovery decisions, and safe resume metadata. Resume never replays prior writes or commands; unchanged interrupted work can continue from its recorded step, completed or legacy records re-plan, and workspace drift requires manual intervention.
+
+Unified-diff review now supports bounded file-level change-set selection with `--only`; selected files are previewed and applied through the same stale-validated, checkpointed, all-or-rollback transaction. Structured verification remains evidence-only and never silently re-runs commands. The opt-in local index now records bounded dependency, test, and configuration relationships and supports metadata-only queries.
+
+Session approval scopes expose bounded path metadata and can be revoked during an interactive run; exact argument matching, expiry, approval gates, and the immutable safety ceiling remain unchanged. Local MCP calls support cancellation and categorized lifecycle errors, while ACP responses include stable request correlation and categorized validation errors. Extension recipes remain declarative inert metadata.
+
 ## 0.7.0 — 2026-08-26
 
 Forge v0.7 adds bounded durable step journals and workspace fingerprints to recorded sessions. `forge inspect` exposes step state, journal activity, and verification evidence; `forge session resume` re-collects context, refuses workspace drift, and never replays a prior mutation automatically. Legacy v0.6 records remain readable with conservative defaults.
