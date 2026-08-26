@@ -1,7 +1,11 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import type { ForgeEvent } from "../../../packages/protocol/src/index.js";
+import type {
+  CheckResult,
+  ForgeEvent,
+  PlanStep,
+} from "../../../packages/protocol/src/index.js";
 
 export type SessionStatus =
   "running" | "completed" | "failed" | "cancelled" | "interrupted";
@@ -13,6 +17,22 @@ export interface PlanSnapshot {
   verification: string[];
 }
 
+export type JournalStepStatus =
+  PlanStep["status"] | "awaiting-approval" | "stale";
+
+export interface StepJournalEntry {
+  stepId: string;
+  description: string;
+  status: JournalStepStatus;
+  startedAt?: string;
+  updatedAt: string;
+  proposalIds: string[];
+  toolResults: number;
+  lastTool?: string;
+  lastResultOk?: boolean;
+  lastApproval?: "approve-once" | "approve-session" | "deny" | "cancel";
+}
+
 export interface SessionRecord {
   id: string;
   workspace: string;
@@ -20,7 +40,10 @@ export interface SessionRecord {
   updatedAt: string;
   status: SessionStatus;
   resumeCount: number;
+  workspaceFingerprint?: string;
   plan?: PlanSnapshot;
+  journal: StepJournalEntry[];
+  verification: CheckResult[];
   events: ForgeEvent[];
 }
 
@@ -47,6 +70,8 @@ export class SessionStore {
       updatedAt: timestamp,
       status: "running",
       resumeCount: 0,
+      journal: [],
+      verification: [],
       events: [],
     };
     await this.save(record);
@@ -54,11 +79,26 @@ export class SessionStore {
   }
 
   public async save(record: SessionRecord): Promise<void> {
+    if (!Array.isArray(record.journal)) record.journal = [];
+    if (!Array.isArray(record.verification)) record.verification = [];
     if (!/^[0-9a-f-]{36}$/i.test(record.id))
       throw new Error("Invalid session ID");
     await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
     const sanitized = JSON.stringify(
-      { ...record, events: record.events.slice(-500) },
+      {
+        ...record,
+        journal: record.journal.slice(0, 64).map((entry) => ({
+          ...entry,
+          description: entry.description.slice(0, 500),
+          proposalIds: entry.proposalIds.slice(-32),
+        })),
+        verification: record.verification.slice(0, 32).map((check) => ({
+          ...check,
+          command: check.command.slice(0, 500),
+          output: check.output.slice(0, 100_000),
+        })),
+        events: record.events.slice(-500),
+      },
       null,
       2,
     );
@@ -75,10 +115,12 @@ export class SessionStore {
   }
 
   public async append(record: SessionRecord, event: ForgeEvent): Promise<void> {
+    if (!Array.isArray(record.journal)) record.journal = [];
+    if (!Array.isArray(record.verification)) record.verification = [];
     const sanitized = this.sanitizeEvent(event);
     record.events.push(sanitized);
     record.updatedAt = new Date().toISOString();
-    if (sanitized.type === "agent.plan")
+    if (sanitized.type === "agent.plan") {
       record.plan = {
         goal: sanitized.goal,
         steps: sanitized.steps.map(({ id, description, status }) => ({
@@ -89,7 +131,65 @@ export class SessionStore {
         assumptions: [...sanitized.assumptions],
         verification: [...sanitized.verification],
       };
-    if (sanitized.type === "session.complete") record.status = sanitized.status;
+      const now = new Date().toISOString();
+      record.journal = sanitized.steps.map((step) => ({
+        stepId: step.id,
+        description: step.description,
+        status: step.status,
+        ...(step.status === "active" ? { startedAt: now } : {}),
+        updatedAt: now,
+        proposalIds: [],
+        toolResults: 0,
+      }));
+    }
+    if (sanitized.type === "tool.proposal") {
+      const current = currentJournalEntry(record);
+      if (current) {
+        current.status = "awaiting-approval";
+        current.updatedAt = new Date().toISOString();
+        current.proposalIds.push(sanitized.id);
+        current.lastTool = sanitized.tool;
+      }
+    }
+    if (sanitized.type === "approval.result") {
+      const current = currentJournalEntry(record);
+      if (current) {
+        current.lastApproval = sanitized.decision;
+        current.updatedAt = new Date().toISOString();
+      }
+    }
+    if (sanitized.type === "tool.result") {
+      const current = currentJournalEntry(record);
+      if (current) {
+        current.status = sanitized.ok ? "active" : "blocked";
+        current.updatedAt = new Date().toISOString();
+        current.toolResults += 1;
+        current.lastTool = sanitized.tool;
+        current.lastResultOk = sanitized.ok;
+      }
+    }
+    if (sanitized.type === "session.complete") {
+      record.status = sanitized.status;
+      record.verification = sanitized.checks.map((check) => ({ ...check }));
+      const now = new Date().toISOString();
+      if (sanitized.status === "completed") {
+        for (const entry of record.journal) {
+          if (
+            entry.status === "active" ||
+            entry.status === "awaiting-approval"
+          ) {
+            entry.status = "complete";
+            entry.updatedAt = now;
+          }
+        }
+      } else {
+        const current = currentJournalEntry(record);
+        if (current) {
+          current.status = "blocked";
+          current.updatedAt = now;
+        }
+      }
+    }
     if (sanitized.type === "session.cancel") record.status = "cancelled";
     await this.save(record);
   }
@@ -166,6 +266,22 @@ export class SessionStore {
       resumeCount: Number.isSafeInteger(record.resumeCount)
         ? record.resumeCount
         : 0,
+      journal: Array.isArray(record.journal)
+        ? record.journal.slice(0, 64).map((entry) => ({
+            ...entry,
+            description: String(entry.description ?? "").slice(0, 500),
+            proposalIds: Array.isArray(entry.proposalIds)
+              ? entry.proposalIds.slice(-32).map(String)
+              : [],
+          }))
+        : [],
+      verification: Array.isArray(record.verification)
+        ? record.verification.slice(0, 32).map((check) => ({
+            ...check,
+            command: String(check.command ?? "").slice(0, 500),
+            output: String(check.output ?? "").slice(0, 100_000),
+          }))
+        : [],
     };
   }
 
@@ -184,6 +300,17 @@ export class SessionStore {
       copy.arguments = redactValue(copy.arguments) as Record<string, unknown>;
     return copy;
   }
+}
+
+function currentJournalEntry(
+  record: SessionRecord,
+): StepJournalEntry | undefined {
+  return (
+    record.journal.find(
+      (entry) =>
+        entry.status === "active" || entry.status === "awaiting-approval",
+    ) ?? record.journal.find((entry) => entry.status === "pending")
+  );
 }
 
 function redactValue(value: unknown): unknown {

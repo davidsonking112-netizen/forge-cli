@@ -9,14 +9,17 @@ import type {
   ToolProposalEvent,
 } from "../../../packages/protocol/src/index.js";
 import { ForgeSupervisor } from "./supervisor.js";
-import { buildRepositoryContext } from "./context.js";
+import {
+  buildRepositoryContext,
+  fingerprintRepositoryContext,
+} from "./context.js";
 import { FullScreenTui } from "./tui.js";
 import {
   AcpJsonlBridge,
   loadExternalServers,
   validateExternalServerConfig,
 } from "./integrations.js";
-import { WorkspaceTools } from "./tools.js";
+import { PolicyEngine, TOOL_METADATA, WorkspaceTools } from "./tools.js";
 import { McpStdioClient } from "./mcp.js";
 import { summarizeUnifiedDiff } from "./diff.js";
 import { loadPolicyPack } from "./policy.js";
@@ -32,7 +35,7 @@ import {
   readRepositoryIndex,
 } from "./index.js";
 
-const VERSION = "0.6.1";
+const VERSION = "0.7.0";
 
 function usage(): string {
   return `Forge CLI v${VERSION}
@@ -44,16 +47,19 @@ Usage:
   forge doctor [--repair]                Check runtime; print safe repair guidance
   forge config show|path|set <key> <v>   Inspect or update local configuration
   forge session list|resume|export|delete Manage local sessions
+  forge verify <session-id>                 Inspect structured verification evidence
   forge undo <checkpoint-id>              Restore a Forge-managed checkpoint
   forge git status|branch|stage|commit    Use approval-gated local Git workflows
   forge git prepare-pr [title]            Prepare a local review-ready PR draft
   forge mcp validate                       Validate MCP config without launching servers
   forge mcp list|enable|disable|tools|call Use explicitly enabled MCP stdio servers
   forge review <diff-file>                Inspect a unified diff without applying it
+  forge preview-diff <diff-file>          Preview changes and report conflicts
   forge apply-diff <diff-file>            Apply a reviewed diff after approval
   forge acp serve                          Adapt local ACP JSON-RPC lines safely
   forge policy validate <file>             Validate a stricter local policy pack
   forge policy effective [file]            Show the effective safety restrictions
+  forge policy explain <risk> [tool]       Explain an allow/approval/deny decision
   forge context <prompt>                   Inspect selected context and checks
   forge profiles                           List bounded autonomy profiles
   forge index build|show|clear             Manage the opt-in local metadata index
@@ -90,10 +96,12 @@ function parseArgs(argv: string[]): ParsedArgs {
     "config",
     "session",
     "inspect",
+    "verify",
     "undo",
     "integrations",
     "mcp",
     "review",
+    "preview-diff",
     "apply-diff",
     "acp",
     "policy",
@@ -311,6 +319,19 @@ async function sessionCommand(args: ParsedArgs): Promise<number> {
       console.error("This session does not contain a resumable prompt");
       return 1;
     }
+    if (record.workspaceFingerprint) {
+      const currentContext = await buildRepositoryContext(
+        record.workspace,
+        start.prompt,
+      );
+      const currentFingerprint = fingerprintRepositoryContext(currentContext);
+      if (currentFingerprint !== record.workspaceFingerprint) {
+        console.error(
+          "Workspace state changed since this session; inspect and re-plan before resuming.",
+        );
+        return 2;
+      }
+    }
     await supervisor.markSessionResumed(record.id);
     return runTask({
       command: "interactive",
@@ -320,6 +341,53 @@ async function sessionCommand(args: ParsedArgs): Promise<number> {
   }
   console.error("Usage: forge session list|resume|export|delete <id>");
   return 2;
+}
+
+async function verifyCommand(args: ParsedArgs): Promise<number> {
+  const sessionId = args.positional[0];
+  if (!sessionId) {
+    console.error("Usage: forge verify <session-id>");
+    return 2;
+  }
+  try {
+    const session = await new ForgeSupervisor().readSession(sessionId);
+    let stale = false;
+    if (session.workspaceFingerprint) {
+      const context = await buildRepositoryContext(
+        session.workspace,
+        session.plan?.goal ?? "verification",
+      );
+      stale =
+        fingerprintRepositoryContext(context) !== session.workspaceFingerprint;
+    }
+    const evidence = session.verification.map((check) => ({
+      ...check,
+      status:
+        stale && check.status === "passed"
+          ? "stale"
+          : (check.status ?? (check.ok ? "passed" : "failed")),
+    }));
+    console.log(
+      JSON.stringify(
+        {
+          sessionId: session.id,
+          workspace: session.workspace,
+          stale,
+          replayed: false,
+          evidence,
+        },
+        null,
+        2,
+      ),
+    );
+    return evidence.length > 0 &&
+      evidence.every((check) => check.status === "passed")
+      ? 0
+      : 1;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
 }
 
 async function inspectCommand(args: ParsedArgs): Promise<number> {
@@ -388,7 +456,10 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
           profile,
           status: session.status,
           resumeCount: session.resumeCount,
+          workspaceFingerprint: session.workspaceFingerprint,
           plan: session.plan,
+          journal: session.journal,
+          verification: session.verification,
           eventCount: session.events.length,
           eventTypes: counts,
           toolMetrics,
@@ -526,8 +597,10 @@ async function indexCommand(args: ParsedArgs): Promise<number> {
         JSON.stringify(
           {
             action,
+            version: index.version,
             root: index.root,
             files: index.files.length,
+            scan: index.scan,
             updatedAt: index.updatedAt,
           },
           null,
@@ -631,6 +704,61 @@ async function extensionsCommand(args: ParsedArgs): Promise<number> {
 
 async function policyCommand(args: ParsedArgs): Promise<number> {
   const action = args.positional[0];
+  if (action === "explain") {
+    const risk = args.positional[1];
+    const validRisks = [
+      "read-only",
+      "reversible-write",
+      "local-execution",
+      "destructive",
+      "network",
+      "credential-sensitive",
+    ] as const;
+    if (!risk || !validRisks.includes(risk as (typeof validRisks)[number])) {
+      console.error(
+        "Usage: forge policy explain <risk> [tool] [--profile <name>]",
+      );
+      return 2;
+    }
+    const tool = args.positional[2];
+    if (tool && !TOOL_METADATA[tool as keyof typeof TOOL_METADATA]) {
+      console.error(`Unknown Forge tool: ${tool}`);
+      return 2;
+    }
+    try {
+      const profile = getAutonomyProfile(flagString(args.flags, "profile"));
+      const packPath = flagString(args.flags, "policy-pack");
+      const pack = packPath
+        ? await loadPolicyPack(path.resolve(packPath))
+        : null;
+      const allRisks = [...validRisks];
+      const profileDeniedRisks = allRisks.filter(
+        (value) => !profile.allowedRisks.includes(value),
+      );
+      const policy = new PolicyEngine("safe", {
+        denyRisks: [...profileDeniedRisks, ...(pack?.denyRisks ?? [])],
+        ...(pack?.denyTools ? { denyTools: pack.denyTools } : {}),
+      });
+      console.log(
+        JSON.stringify(
+          {
+            profile: profile.name,
+            policyPack: pack?.id ?? null,
+            decision: policy.explain(
+              risk as (typeof validRisks)[number],
+              tool as keyof typeof TOOL_METADATA | undefined,
+            ),
+          },
+          null,
+          2,
+        ),
+      );
+      return 0;
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      return 1;
+    }
+  }
   if (action === "effective") {
     try {
       const pack = args.positional[1]
@@ -660,7 +788,9 @@ async function policyCommand(args: ParsedArgs): Promise<number> {
     }
   }
   if (action !== "validate" || !args.positional[1]) {
-    console.error("Usage: forge policy validate <file> | effective [file]");
+    console.error(
+      "Usage: forge policy validate <file> | effective [file] | explain <risk> [tool]",
+    );
     return 2;
   }
   try {
@@ -698,6 +828,28 @@ async function acpCommand(args: ParsedArgs): Promise<number> {
   return 0;
 }
 
+async function previewDiffCommand(args: ParsedArgs): Promise<number> {
+  const diffPath = args.positional[0];
+  if (!diffPath) {
+    console.error("Usage: forge preview-diff <diff-file>");
+    return 2;
+  }
+  try {
+    const diff = await fs.readFile(path.resolve(diffPath), "utf8");
+    const workspace = path.resolve(
+      flagString(args.flags, "workspace", process.cwd()),
+    );
+    const preview = await new WorkspaceTools(workspace).previewUnifiedDiff(
+      diff,
+    );
+    console.log(JSON.stringify(preview, null, 2));
+    return preview.safeToApply ? 0 : 1;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
 async function diffCommand(args: ParsedArgs, apply: boolean): Promise<number> {
   const diffPath = args.positional[0];
   if (!diffPath) {
@@ -713,18 +865,24 @@ async function diffCommand(args: ParsedArgs, apply: boolean): Promise<number> {
       console.log(JSON.stringify({ mode: "review", summary }, null, 2));
       return 0;
     }
+    const workspace = path.resolve(
+      flagString(args.flags, "workspace", process.cwd()),
+    );
+    const tools = new WorkspaceTools(workspace);
+    const preview = await tools.previewUnifiedDiff(diff);
+    if (!preview.safeToApply) {
+      console.log(JSON.stringify({ mode: "apply", summary, preview }, null, 2));
+      return 1;
+    }
     if (!input.isTTY) {
       console.error(
         "Applying a unified diff requires an interactive terminal approval.",
       );
       return 2;
     }
-    const workspace = path.resolve(
-      flagString(args.flags, "workspace", process.cwd()),
-    );
     const rl = createInterface({ input, output });
     try {
-      console.log(JSON.stringify(summary, null, 2));
+      console.log(JSON.stringify({ summary, preview }, null, 2));
       const answer = (
         await rl.question("Apply this unified diff? Type YES to continue: ")
       ).trim();
@@ -735,7 +893,7 @@ async function diffCommand(args: ParsedArgs, apply: boolean): Promise<number> {
     } finally {
       rl.close();
     }
-    const result = await new WorkspaceTools(workspace).execute({
+    const result = await tools.execute({
       tool: "workspace.apply_unified_diff",
       arguments: { diff },
     });
@@ -1051,10 +1209,12 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (args.command === "config") return configCommand(args);
   if (args.command === "session") return sessionCommand(args);
   if (args.command === "inspect") return inspectCommand(args);
+  if (args.command === "verify") return verifyCommand(args);
   if (args.command === "undo") return undoCommand(args);
   if (args.command === "integrations") return integrationsCommand(args);
   if (args.command === "mcp") return mcpCommand(args);
   if (args.command === "review") return diffCommand(args, false);
+  if (args.command === "preview-diff") return previewDiffCommand(args);
   if (args.command === "apply-diff") return diffCommand(args, true);
   if (args.command === "acp") return acpCommand(args);
   if (args.command === "policy") return policyCommand(args);

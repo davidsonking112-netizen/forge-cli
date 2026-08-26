@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0 — 2026-08-26
+
+Forge v0.7 adds bounded durable step journals and workspace fingerprints to recorded sessions. `forge inspect` exposes step state, journal activity, and verification evidence; `forge session resume` re-collects context, refuses workspace drift, and never replays a prior mutation automatically. Legacy v0.6 records remain readable with conservative defaults.
+
+Structured verification records now retain typed status, exit code, bounded output, completion time, truncation state, and the workspace fingerprint used for stale detection. `forge verify` is a read-only evidence-inspection command and does not re-run commands. `forge preview-diff` reports planned file actions, current hashes, byte changes, and conflicts without writing; stale or invalid changes remain rejected by the existing transactional apply path.
+
+The local metadata index is now incremental, reusing unchanged entries and reporting refreshed and removed files without persisting file contents. `forge policy explain` reports the global ceiling, profile and policy-pack restrictions, approval requirements, and final decision. Session approvals carry expiring exact-argument scopes rather than blanket session authority.
+
+Extension manifests may now declare bounded context-glob and verification recipes as inert metadata. Recipes cannot execute code, load third-party modules, replace built-in tools, or lower policy. MCP and ACP remain local, bounded, explicitly enabled integration boundaries.
+
 ## 0.6.1 — 2026-08-26
 
 The v0.6 audit patch isolates the Python worker from workspace-controlled module paths, validates workspace startup before spawning, reports unavailable interpreters without uncaught child-process errors, rejects session-ID traversal, writes session records atomically, and redacts secrets in process arguments as well as commands.

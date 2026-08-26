@@ -25,6 +25,22 @@ export interface ToolMetadata {
   description: string;
 }
 
+export interface UnifiedDiffPreviewFile {
+  path: string;
+  action: "create" | "modify" | "delete" | "rename";
+  currentSha256: string | null;
+  bytesBefore: number;
+  bytesAfter: number | null;
+  conflict: string | null;
+}
+
+export interface UnifiedDiffPreview {
+  safeToApply: boolean;
+  summary: { files: number; hunks: number };
+  files: UnifiedDiffPreviewFile[];
+  conflicts: string[];
+}
+
 const ignoredDirectories = new Set([
   ".git",
   "node_modules",
@@ -155,6 +171,95 @@ export class WorkspaceTools {
     ),
   ) {
     this.checkpointRoot = checkpointRoot;
+  }
+
+  public async previewUnifiedDiff(diff: string): Promise<UnifiedDiffPreview> {
+    if (typeof diff !== "string")
+      throw new Error("Unified diff requires string diff content");
+    const patches = parseUnifiedDiff(diff);
+    const files: UnifiedDiffPreviewFile[] = [];
+    const conflicts: string[] = [];
+    for (const patch of patches) {
+      const oldTarget = patch.oldPath ? this.resolveSafe(patch.oldPath) : null;
+      const newTarget = patch.newPath ? this.resolveSafe(patch.newPath) : null;
+      const displayPath = patch.newPath ?? patch.oldPath;
+      if (!displayPath || (!oldTarget && !newTarget))
+        throw new Error("Unified diff has no target path");
+      const previous = oldTarget
+        ? await fs.readFile(oldTarget, "utf8").catch((error: unknown) => {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+            throw error;
+          })
+        : null;
+      const destination = newTarget
+        ? await fs.readFile(newTarget, "utf8").catch((error: unknown) => {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+            throw error;
+          })
+        : null;
+      const action: UnifiedDiffPreviewFile["action"] = !patch.newPath
+        ? "delete"
+        : !patch.oldPath
+          ? "create"
+          : oldTarget !== newTarget
+            ? "rename"
+            : "modify";
+      let conflict: string | null = null;
+      let bytesAfter: number | null = null;
+      if (action === "create" && destination !== null)
+        conflict = `File already exists: ${displayPath}`;
+      else if (
+        (action === "modify" || action === "delete") &&
+        previous === null
+      )
+        conflict = `File does not exist: ${displayPath}`;
+      else if (action === "rename" && previous === null)
+        conflict = `Rename source does not exist: ${patch.oldPath}`;
+      else if (action === "rename" && destination !== null)
+        conflict = `Rename destination already exists: ${patch.newPath}`;
+      else {
+        try {
+          const next =
+            action === "delete"
+              ? ""
+              : applyUnifiedFilePatch(previous ?? "", patch);
+          bytesAfter = Buffer.byteLength(next, "utf8");
+        } catch (error) {
+          conflict = error instanceof Error ? error.message : String(error);
+        }
+      }
+      if (conflict) conflicts.push(conflict);
+      files.push({
+        path: displayPath,
+        action,
+        currentSha256: previous
+          ? createHash("sha256").update(previous).digest("hex")
+          : null,
+        bytesBefore: previous ? Buffer.byteLength(previous, "utf8") : 0,
+        bytesAfter,
+        conflict,
+      });
+      if (action === "rename")
+        files.push({
+          path: patch.newPath as string,
+          action: "rename",
+          currentSha256: destination
+            ? createHash("sha256").update(destination).digest("hex")
+            : null,
+          bytesBefore: destination ? Buffer.byteLength(destination, "utf8") : 0,
+          bytesAfter: conflict ? null : bytesAfter,
+          conflict,
+        });
+    }
+    return {
+      safeToApply: conflicts.length === 0,
+      summary: {
+        files: patches.length,
+        hunks: patches.reduce((count, patch) => count + patch.hunks.length, 0),
+      },
+      files,
+      conflicts,
+    };
   }
 
   public async execute(request: ToolRequest): Promise<ToolResult> {
@@ -496,7 +601,12 @@ export class WorkspaceTools {
       if (!relativePath) throw new Error("Unified diff has no target path");
       const target = newTarget ?? oldTarget;
       if (!target) throw new Error("Unified diff target is invalid");
-      const previous = await fs.readFile(target, "utf8").catch(() => null);
+      const previous = await fs
+        .readFile(target, "utf8")
+        .catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+          throw error;
+        });
       if (!patch.oldPath && previous !== null)
         throw new Error(`File already exists: ${relativePath}`);
       if (!patch.newPath) {
@@ -707,14 +817,43 @@ export class PolicyEngine {
   }
 
   public isAllowed(risk: RiskClass, tool?: ToolName): boolean {
-    if (this.deniedRisks.has(risk) || (tool && this.deniedTools.has(tool)))
-      return false;
+    return this.explain(risk, tool).allowed;
+  }
+
+  public explain(
+    risk: RiskClass,
+    tool?: ToolName,
+  ): {
+    mode: "safe" | "session-approve" | "unsafe";
+    risk: RiskClass;
+    tool?: ToolName;
+    allowed: boolean;
+    approvalRequired: boolean;
+    reasons: string[];
+  } {
+    const reasons: string[] = [];
     if (
       risk === "destructive" ||
       risk === "network" ||
       risk === "credential-sensitive"
     )
-      return false;
-    return true;
+      reasons.push("global safety ceiling denies this risk class");
+    if (this.deniedRisks.has(risk))
+      reasons.push("policy restriction denies this risk class");
+    if (tool && this.deniedTools.has(tool))
+      reasons.push("policy restriction denies this tool");
+    const allowed = reasons.length === 0;
+    const approvalRequired = allowed && this.requiresApproval(risk);
+    if (approvalRequired) reasons.push("explicit approval is required");
+    if (allowed && !approvalRequired)
+      reasons.push("read-only action is automatic");
+    return {
+      mode: this.mode,
+      risk,
+      ...(tool ? { tool } : {}),
+      allowed,
+      approvalRequired,
+      reasons,
+    };
   }
 }

@@ -40,6 +40,7 @@ export interface SessionStartEvent extends BaseEvent {
   capabilities: string[];
   prompt?: string;
   context?: unknown;
+  workspaceFingerprint?: string;
 }
 
 export interface UserPromptEvent extends BaseEvent {
@@ -99,11 +100,19 @@ export interface ToolError {
   retryable: boolean;
 }
 
+export interface ApprovalScope {
+  tool: ToolName;
+  argumentDigest: string;
+  summary: string;
+  expiresAt: string;
+}
+
 export interface ApprovalResultEvent extends BaseEvent {
   type: "approval.result";
   proposalId: string;
   decision: "approve-once" | "approve-session" | "deny" | "cancel";
   category?: "automatic" | "user" | "policy";
+  scope?: ApprovalScope;
 }
 
 export interface SessionCancelEvent extends BaseEvent {
@@ -119,11 +128,19 @@ export interface SessionCompleteEvent extends BaseEvent {
   checks: CheckResult[];
 }
 
+export type VerificationStatus =
+  "not-run" | "passed" | "failed" | "timed-out" | "blocked" | "stale";
+
 export interface CheckResult {
   command: string;
   ok: boolean;
   exitCode: number | null;
   output: string;
+  status?: VerificationStatus;
+  startedAt?: string;
+  finishedAt?: string;
+  workspaceFingerprint?: string;
+  outputTruncated?: boolean;
 }
 
 export interface ErrorEvent extends BaseEvent {

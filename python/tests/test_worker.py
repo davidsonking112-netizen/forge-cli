@@ -10,7 +10,7 @@ from unittest import mock
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from forge_agent.orchestration import BoundedOrchestrator
 from forge_agent.providers import MockProvider, OpenAICompatibleProvider, ProviderReply, redact
-from forge_agent.worker import MockAgent, main
+from forge_agent.worker import MockAgent, main, verification_check
 
 
 class WorkerTests(unittest.TestCase):
@@ -27,6 +27,7 @@ class WorkerTests(unittest.TestCase):
                 "provider": "mock",
                 "capabilities": [],
                 "prompt": "Explain this repository",
+                "workspaceFingerprint": "a" * 64,
             },
             {
                 "protocol": 1,
@@ -102,6 +103,20 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(completion["status"], "failed")
         self.assertEqual(completion["checks"][0]["exitCode"], 2)
         self.assertEqual(completion["checks"][0]["output"], "failed test")
+        self.assertEqual(completion["checks"][0]["status"], "failed")
+        self.assertTrue(completion["checks"][0]["finishedAt"])
+        self.assertFalse(completion["checks"][0]["outputTruncated"])
+
+    def test_verification_timeout_is_typed(self):
+        check = verification_check(
+            {},
+            ok=False,
+            fallback="Command timed out after 100ms",
+            error={"code": "TOOL_EXECUTION_ERROR", "message": "Command timed out after 100ms"},
+            workspace_fingerprint="b" * 64,
+        )
+        self.assertEqual(check["status"], "timed-out")
+        self.assertEqual(check["workspaceFingerprint"], "b" * 64)
 
     def test_provider_errors_are_redacted(self):
         message = redact('api_key=sk-1234567890 secret=visible token=abc123')

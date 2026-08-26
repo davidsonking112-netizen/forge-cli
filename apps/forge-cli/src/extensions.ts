@@ -6,11 +6,17 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { TOOL_METADATA, type ToolMetadata } from "./tools.js";
 
+export interface ForgeExtensionRecipes {
+  contextGlobs: string[];
+  verification: string[][];
+}
+
 export interface ForgeExtensionManifest {
   id: string;
   version: string;
   protocol: number;
   capabilities: Array<"tool" | "provider" | "context" | "renderer">;
+  recipes?: ForgeExtensionRecipes;
 }
 
 export interface ForgeToolExtension {
@@ -53,6 +59,7 @@ export class ExtensionRegistry {
       );
     if (this.manifests.has(manifest.id))
       throw new Error(`Extension ${manifest.id} is already registered`);
+    const recipes = validateRecipes(manifest.id, manifest.recipes);
     for (const tool of tools) {
       if (!/^[a-z][a-z0-9_.-]{1,63}$/.test(tool.name))
         throw new Error(`Invalid extension tool name: ${tool.name}`);
@@ -64,6 +71,7 @@ export class ExtensionRegistry {
     this.manifests.set(manifest.id, {
       ...manifest,
       capabilities: [...manifest.capabilities],
+      ...(recipes ? { recipes } : {}),
     });
     for (const tool of tools) this.tools.set(tool.name, tool);
   }
@@ -72,6 +80,16 @@ export class ExtensionRegistry {
     return [...this.manifests.values()].map((manifest) => ({
       ...manifest,
       capabilities: [...manifest.capabilities],
+      ...(manifest.recipes
+        ? {
+            recipes: {
+              contextGlobs: [...manifest.recipes.contextGlobs],
+              verification: manifest.recipes.verification.map((command) => [
+                ...command,
+              ]),
+            },
+          }
+        : {}),
     }));
   }
 
@@ -91,6 +109,53 @@ export class ExtensionRegistry {
   }
 }
 
+function validateRecipes(
+  id: string,
+  recipes: ForgeExtensionRecipes | undefined,
+): ForgeExtensionRecipes | undefined {
+  if (recipes === undefined) return undefined;
+  if (!recipes || typeof recipes !== "object")
+    throw new Error(`Extension ${id} recipes must be an object`);
+  const contextGlobs = recipes.contextGlobs;
+  if (
+    !Array.isArray(contextGlobs) ||
+    contextGlobs.length > 16 ||
+    !contextGlobs.every(
+      (glob) =>
+        typeof glob === "string" &&
+        glob.length > 0 &&
+        glob.length <= 200 &&
+        !path.isAbsolute(glob) &&
+        !glob.includes("..") &&
+        !glob.includes("\0"),
+    )
+  )
+    throw new Error(`Extension ${id} has invalid context recipes`);
+  const verification = recipes.verification;
+  if (
+    !Array.isArray(verification) ||
+    verification.length > 8 ||
+    !verification.every(
+      (command) =>
+        Array.isArray(command) &&
+        command.length > 0 &&
+        command.length <= 8 &&
+        command.every(
+          (part) =>
+            typeof part === "string" &&
+            part.length > 0 &&
+            part.length <= 200 &&
+            !part.includes("\0"),
+        ),
+    )
+  )
+    throw new Error(`Extension ${id} has invalid verification recipes`);
+  return {
+    contextGlobs: [...contextGlobs],
+    verification: verification.map((command) => [...command]),
+  };
+}
+
 export async function loadExtensionManifests(
   directory: string,
 ): Promise<ForgeExtensionManifest[]> {
@@ -106,14 +171,22 @@ export async function loadExtensionManifests(
       throw new Error(
         `Extension manifest exceeds the 100000-byte limit: ${entry.name}`,
       );
-    const parsed = JSON.parse(content) as Record<string, unknown>;
+    const parsed = JSON.parse(content) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new Error(
+        `Extension manifest must have an object root: ${entry.name}`,
+      );
+    const manifest = parsed as Record<string, unknown>;
     registry.register({
-      id: String(parsed.id ?? ""),
-      version: String(parsed.version ?? ""),
-      protocol: parsed.protocol as 1,
-      capabilities: Array.isArray(parsed.capabilities)
-        ? (parsed.capabilities as ForgeExtensionManifest["capabilities"])
+      id: String(manifest.id ?? ""),
+      version: String(manifest.version ?? ""),
+      protocol: manifest.protocol as 1,
+      capabilities: Array.isArray(manifest.capabilities)
+        ? (manifest.capabilities as ForgeExtensionManifest["capabilities"])
         : [],
+      ...(manifest.recipes === undefined
+        ? {}
+        : { recipes: manifest.recipes as ForgeExtensionRecipes }),
     });
   }
   return registry.list();

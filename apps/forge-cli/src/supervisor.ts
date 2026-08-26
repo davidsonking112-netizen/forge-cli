@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import { promises as fs } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -11,12 +11,17 @@ import {
   type ForgeEvent,
   type PolicyMode,
   type RiskClass,
+  type ApprovalScope,
+  type ToolName,
   type ToolProposalEvent,
   type ToolResultEvent,
 } from "../../../packages/protocol/src/index.js";
 import { PolicyEngine, TOOL_METADATA, WorkspaceTools } from "./tools.js";
 import { SessionStore, type SessionRecord } from "./sessions.js";
-import { buildRepositoryContext } from "./context.js";
+import {
+  buildRepositoryContext,
+  fingerprintRepositoryContext,
+} from "./context.js";
 import type { PolicyPack } from "./policy.js";
 import { getAutonomyProfile, type AutonomyProfileName } from "./profiles.js";
 
@@ -69,6 +74,8 @@ export class ForgeSupervisor {
             updatedAt: timestamp,
             status: "running",
             resumeCount: 0,
+            journal: [],
+            verification: [],
             events: [],
           }
         : await this.sessions.create(workspace);
@@ -98,6 +105,10 @@ export class ForgeSupervisor {
       workspace,
       options.prompt,
     );
+    const workspaceFingerprint =
+      fingerprintRepositoryContext(repositoryContext);
+    session.workspaceFingerprint = workspaceFingerprint;
+    if (options.record !== false) await this.sessions.save(session);
     const worker = this.startWorker(options);
     let workerError: Error | undefined;
     worker.on("error", (error) => {
@@ -108,6 +119,7 @@ export class ForgeSupervisor {
     });
     let sessionResult: RunResult | undefined;
     let approvalMode: "safe" | "session-approve" | "unsafe" = policy.mode;
+    let approvalScope: ApprovalScope | undefined;
 
     const send = (event: ForgeEvent): void => {
       if (workerError) throw workerError;
@@ -151,8 +163,11 @@ export class ForgeSupervisor {
               decision = "approve-session";
             } else if (
               approvalMode === "session-approve" &&
-              event.risk !== "destructive" &&
-              event.risk !== "network"
+              approvalScope &&
+              new Date(approvalScope.expiresAt).getTime() > Date.now() &&
+              approvalScope.tool === event.tool &&
+              approvalScope.argumentDigest ===
+                this.argumentDigest(event.arguments)
             ) {
               approved = true;
               decision = "approve-session";
@@ -160,8 +175,10 @@ export class ForgeSupervisor {
               decision = await options.approve(event);
               approved =
                 decision === "approve-once" || decision === "approve-session";
-              if (decision === "approve-session")
+              if (decision === "approve-session") {
                 approvalMode = "session-approve";
+                approvalScope = this.createApprovalScope(event);
+              }
             }
           }
           const policyAllowed = policy.isAllowed(event.risk, event.tool);
@@ -175,6 +192,9 @@ export class ForgeSupervisor {
               : !policyAllowed
                 ? "policy"
                 : "user",
+            ...(decision === "approve-session" && approvalScope
+              ? { scope: approvalScope }
+              : {}),
           });
           if (decision === "cancel") {
             send(
@@ -236,6 +256,7 @@ export class ForgeSupervisor {
       capabilities: Object.keys(TOOL_METADATA),
       prompt: options.prompt,
       context: repositoryContext,
+      workspaceFingerprint,
     };
     await emit(startEvent);
     send(startEvent);
@@ -330,6 +351,22 @@ export class ForgeSupervisor {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
+  }
+
+  private argumentDigest(arguments_: Record<string, unknown>): string {
+    return createHash("sha256")
+      .update(JSON.stringify(arguments_))
+      .digest("hex");
+  }
+
+  private createApprovalScope(proposal: ToolProposalEvent): ApprovalScope {
+    const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
+    return {
+      tool: proposal.tool as ToolName,
+      argumentDigest: this.argumentDigest(proposal.arguments),
+      summary: `Exact arguments for ${proposal.tool}; expires in 15 minutes`,
+      expiresAt,
+    };
   }
 
   private errorEvent(

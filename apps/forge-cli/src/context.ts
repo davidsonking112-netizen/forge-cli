@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -8,6 +9,7 @@ const execFileAsync = promisify(execFile);
 export interface ContextFile {
   path: string;
   bytes: number;
+  mtimeMs?: number;
   content?: string;
   symbols?: string[];
   reasons?: string[];
@@ -22,6 +24,33 @@ export interface RepositoryContext {
   relevantFiles: ContextFile[];
   verificationCommands: string[][];
   changedFiles: string[];
+}
+
+export function fingerprintRepositoryContext(
+  context: RepositoryContext,
+): string {
+  const hash = createHash("sha256");
+  hash.update(context.root);
+  hash.update(
+    JSON.stringify(
+      context.files.map(({ path: filePath, bytes, mtimeMs }) => ({
+        path: filePath,
+        bytes,
+        mtimeMs,
+      })),
+    ),
+  );
+  hash.update(JSON.stringify(context.changedFiles));
+  hash.update(
+    JSON.stringify(
+      context.relevantFiles.map(({ path: filePath, bytes, content }) => ({
+        path: filePath,
+        bytes,
+        content: content ?? "",
+      })),
+    ),
+  );
+  return hash.digest("hex");
 }
 
 const ignored = new Set([
@@ -133,7 +162,11 @@ async function collect(root: string): Promise<ContextFile[]> {
       if (entry.isDirectory()) await visit(absolute);
       else if (entry.isFile()) {
         const stat = await fs.stat(absolute);
-        files.push({ path: relative, bytes: stat.size });
+        files.push({
+          path: relative,
+          bytes: stat.size,
+          mtimeMs: Math.trunc(stat.mtimeMs),
+        });
       }
       if (files.length >= 2000) return;
     }

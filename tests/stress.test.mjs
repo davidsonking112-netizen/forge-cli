@@ -198,7 +198,7 @@ test("no-record supervisor runs do not persist session data", async () => {
   }
 });
 
-test("v0.6 CLI exposes safe review, ACP, policy, extension, MCP, and PR workflows", async () => {
+test("v0.7 CLI exposes recovery, preview, verification, policy, extension, MCP, and PR workflows", async () => {
   const root = await fixture();
   try {
     const config = path.join(root, "integrations.json");
@@ -309,6 +309,14 @@ test("v0.6 CLI exposes safe review, ACP, policy, extension, MCP, and PR workflow
     });
     assert.equal(reviewed.status, 0);
     assert.match(reviewed.stdout, /\"hunks\": 1/);
+    const preview = spawnSync(
+      process.execPath,
+      [cli, "preview-diff", diffFile, "--workspace", root],
+      { cwd: process.cwd(), encoding: "utf8" },
+    );
+    assert.equal(preview.status, 0);
+    assert.match(preview.stdout, /\"safeToApply\": true/);
+    assert.match(preview.stdout, /\"action\": \"modify\"/);
     const acp = spawnSync(process.execPath, [cli, "acp", "serve"], {
       cwd: process.cwd(),
       input:
@@ -352,6 +360,22 @@ test("v0.6 CLI exposes safe review, ACP, policy, extension, MCP, and PR workflow
     );
     assert.equal(effective.status, 0);
     assert.match(effective.stdout, /globalSafetyCeiling/);
+    const explanation = spawnSync(
+      process.execPath,
+      [
+        cli,
+        "policy",
+        "explain",
+        "local-execution",
+        "process.run",
+        "--profile",
+        "research",
+      ],
+      { cwd: process.cwd(), encoding: "utf8" },
+    );
+    assert.equal(explanation.status, 0);
+    assert.match(explanation.stdout, /\"allowed\": false/);
+    assert.match(explanation.stdout, /profile/);
     const context = spawnSync(
       process.execPath,
       [cli, "context", "find relevant tests", "--workspace", root],
@@ -371,6 +395,10 @@ test("v0.6 CLI exposes safe review, ACP, policy, extension, MCP, and PR workflow
         version: "1.0.0",
         protocol: 1,
         capabilities: ["context"],
+        recipes: {
+          contextGlobs: ["src/**/*.ts"],
+          verification: [["npm", "run", "test"]],
+        },
       }),
     );
     const extensions = spawnSync(
@@ -383,6 +411,59 @@ test("v0.6 CLI exposes safe review, ACP, policy, extension, MCP, and PR workflow
     );
     assert.equal(extensions.status, 0);
     assert.match(extensions.stdout, /\"sample\"/);
+    assert.match(extensions.stdout, /contextGlobs/);
+    const planState = await mkdtemp(
+      path.join(os.tmpdir(), "forge-v07-cli-state-"),
+    );
+    try {
+      const planned = spawnSync(
+        process.execPath,
+        [cli, "plan", "Explain the stress fixture", "--workspace", root],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+          env: { ...process.env, XDG_STATE_HOME: planState },
+        },
+      );
+      assert.equal(planned.status, 0);
+      const listedSessions = spawnSync(
+        process.execPath,
+        [cli, "session", "list"],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+          env: { ...process.env, XDG_STATE_HOME: planState },
+        },
+      );
+      assert.equal(listedSessions.status, 0);
+      const sessionId = listedSessions.stdout.trim().split(/\s+/)[0];
+      assert.match(sessionId, /^[a-f0-9-]{36}$/i);
+      const inspection = spawnSync(
+        process.execPath,
+        [cli, "inspect", sessionId],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+          env: { ...process.env, XDG_STATE_HOME: planState },
+        },
+      );
+      assert.equal(inspection.status, 0);
+      assert.match(inspection.stdout, /journal/);
+      assert.match(inspection.stdout, /workspaceFingerprint/);
+      const verification = spawnSync(
+        process.execPath,
+        [cli, "verify", sessionId],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+          env: { ...process.env, XDG_STATE_HOME: planState },
+        },
+      );
+      assert.equal(verification.status, 1);
+      assert.match(verification.stdout, /"replayed": false/);
+    } finally {
+      await rm(planState, { recursive: true, force: true });
+    }
     const draft = spawnSync(
       process.execPath,
       [cli, "git", "prepare-pr", "stress review", "--workspace", root],

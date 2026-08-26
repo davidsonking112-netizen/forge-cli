@@ -53,6 +53,47 @@ async function tempWorkspace() {
   return directory;
 }
 
+test("v0.7 sessions persist journals and refuse stale workspace resume", async () => {
+  const workspace = await tempWorkspace();
+  const stateHome = await mkdtemp(path.join(os.tmpdir(), "forge-v07-state-"));
+  const sessionDirectory = path.join(stateHome, "forge", "sessions");
+  try {
+    const supervisor = new ForgeSupervisor(new SessionStore(sessionDirectory));
+    const result = await supervisor.run({
+      prompt: "Explain this repository",
+      workspace,
+      record: true,
+    });
+    const record = await new SessionStore(sessionDirectory).read(
+      result.sessionId,
+    );
+    assert.equal(record.status, "completed");
+    assert.match(record.workspaceFingerprint ?? "", /^[a-f0-9]{64}$/);
+    assert.ok(record.journal.length >= 4);
+    assert.ok(record.journal.some((entry) => entry.status === "complete"));
+    assert.ok(record.journal.some((entry) => entry.status === "pending"));
+    const start = record.events.find((event) => event.type === "session.start");
+    assert.equal(start?.type, "session.start");
+    assert.equal(start?.workspaceFingerprint, record.workspaceFingerprint);
+    await writeFile(path.join(workspace, "README.md"), "changed after plan\n");
+    const cli = path.resolve("dist/apps/forge-cli/src/main.js");
+    const resumed = spawnSync(
+      process.execPath,
+      [cli, "session", "resume", record.id],
+      {
+        encoding: "utf8",
+        timeout: 5000,
+        env: { ...process.env, XDG_STATE_HOME: stateHome },
+      },
+    );
+    assert.equal(resumed.status, 2);
+    assert.match(resumed.stderr, /Workspace state changed/i);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+    await rm(stateHome, { recursive: true, force: true });
+  }
+});
+
 test("extension manifests load as validated metadata only", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "forge-extensions-"));
   try {
@@ -63,6 +104,10 @@ test("extension manifests load as validated metadata only", async () => {
         version: "1.0.0",
         protocol: 1,
         capabilities: ["context"],
+        recipes: {
+          contextGlobs: ["src/**/*.ts"],
+          verification: [["npm", "run", "test"]],
+        },
       }),
     );
     const manifests = await loadExtensionManifests(directory);
@@ -71,6 +116,10 @@ test("extension manifests load as validated metadata only", async () => {
       version: "1.0.0",
       protocol: 1,
       capabilities: ["context"],
+      recipes: {
+        contextGlobs: ["src/**/*.ts"],
+        verification: [["npm", "run", "test"]],
+      },
     });
     await writeFile(
       path.join(directory, "bad.json"),
@@ -84,6 +133,24 @@ test("extension manifests load as validated metadata only", async () => {
     await assert.rejects(
       loadExtensionManifests(directory),
       /semantic version/i,
+    );
+    await rm(path.join(directory, "bad.json"));
+    await writeFile(
+      path.join(directory, "unsafe.json"),
+      JSON.stringify({
+        id: "unsafe",
+        version: "1.0.0",
+        protocol: 1,
+        capabilities: ["context"],
+        recipes: {
+          contextGlobs: ["src" + String.fromCharCode(0) + "/*.ts"],
+          verification: [["npm", "run", "test"]],
+        },
+      }),
+    );
+    await assert.rejects(
+      loadExtensionManifests(directory),
+      /invalid context recipes/i,
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -431,6 +498,54 @@ test("unified diffs honor trailing-newline markers", async () => {
   }
 });
 
+test("unified diff preview is read-only and reports stale conflicts", async () => {
+  const directory = await tempWorkspace();
+  try {
+    const diff = [
+      "diff --git a/app.txt b/app.txt",
+      "--- a/app.txt",
+      "+++ b/app.txt",
+      "@@ -1 +1 @@",
+      "-hello forge",
+      "+hello v07",
+      "",
+    ].join("\n");
+    const tools = new WorkspaceTools(directory);
+    const preview = await tools.previewUnifiedDiff(diff);
+    assert.equal(preview.safeToApply, true);
+    assert.equal(preview.files[0].action, "modify");
+    assert.equal(preview.files[0].conflict, null);
+    assert.equal(
+      await readFile(path.join(directory, "app.txt"), "utf8"),
+      "hello forge\n",
+    );
+    await writeFile(path.join(directory, "app.txt"), "changed\n");
+    const stale = await tools.previewUnifiedDiff(diff);
+    assert.equal(stale.safeToApply, false);
+    assert.match(stale.conflicts.join(" "), /current file|context|stale/i);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("policy explanations identify global and profile restrictions", () => {
+  const policy = new PolicyEngine("safe", {
+    denyRisks: ["reversible-write"],
+  });
+  const denied = policy.explain("reversible-write", "workspace.apply_patch");
+  assert.equal(denied.allowed, false);
+  assert.match(denied.reasons.join(" "), /policy restriction/i);
+  const approval = new PolicyEngine("safe").explain(
+    "local-execution",
+    "process.run",
+  );
+  assert.equal(approval.allowed, true);
+  assert.equal(approval.approvalRequired, true);
+  const global = new PolicyEngine("unsafe").explain("network");
+  assert.equal(global.allowed, false);
+  assert.match(global.reasons.join(" "), /global safety ceiling/i);
+});
+
 test("workspace listing retains bounds for malformed numeric arguments", async () => {
   const directory = await tempWorkspace();
   try {
@@ -598,8 +713,15 @@ test("repository index stores bounded metadata and can be cleared explicitly", a
     assert.equal(index.root, directory);
     assert.ok(index.files.length > 0);
     assert.ok(index.files.every((file) => !("content" in file)));
+    assert.ok(index.scan.refreshed > 0);
+    const second = await buildRepositoryIndex(directory);
+    assert.ok(second.scan.reused > 0);
+    await writeFile(path.join(directory, "app.txt"), "changed index\n");
+    const third = await buildRepositoryIndex(directory);
+    assert.ok(third.scan.refreshed > 0);
     const restored = await readRepositoryIndex(directory);
-    assert.equal(restored.files.length, index.files.length);
+    assert.equal(restored.files.length, third.files.length);
+    assert.equal(restored.version, 2);
     await clearRepositoryIndex(directory);
     await assert.rejects(readRepositoryIndex(directory));
   } finally {
@@ -877,6 +999,39 @@ test("supervisor applies a proposed change only after approval", async () => {
       await readFile(path.join(directory, "generated.txt"), "utf8"),
       "Created by Forge v0.1 mock agent.\n",
     );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("session approvals are scoped to the exact tool arguments", async () => {
+  const directory = await tempWorkspace();
+  try {
+    const events = [];
+    let approvals = 0;
+    const supervisor = new ForgeSupervisor();
+    const result = await supervisor.run({
+      prompt: "Create file scoped.txt",
+      workspace: directory,
+      onEvent: (event) => events.push(event),
+      approve: async () => {
+        approvals += 1;
+        return approvals === 1 ? "approve-session" : "approve-once";
+      },
+    });
+    assert.equal(result.status, "completed");
+    assert.equal(approvals, 2);
+    const approvalEvents = events.filter(
+      (event) => event.type === "approval.result" && event.category === "user",
+    );
+    assert.equal(approvalEvents[0].decision, "approve-session");
+    assert.match(
+      approvalEvents[0].scope?.argumentDigest ?? "",
+      /^[a-f0-9]{64}$/,
+    );
+    assert.match(approvalEvents[0].scope?.expiresAt ?? "", /^20/);
+    assert.equal(approvalEvents[1].decision, "approve-once");
+    assert.equal(approvalEvents[1].scope, undefined);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
