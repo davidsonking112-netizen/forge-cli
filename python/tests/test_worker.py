@@ -288,6 +288,31 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn("secret-key", " ".join(non_auth_headers))
         self.assertNotIn("secret-key", request.data.decode("utf-8"))
 
+    def test_provider_keyboard_interrupt_propagates_without_retry(self):
+        provider = OpenAICompatibleProvider(
+            api_key="secret-key",
+            base_url="https://provider.invalid/v1",
+            model="test-model",
+            max_retries=5,
+        )
+        calls = []
+
+        def interrupted_urlopen(request, timeout):
+            del request, timeout
+            calls.append(True)
+            raise KeyboardInterrupt()
+
+        with mock.patch(
+            "forge_agent.providers.urllib.request.urlopen",
+            side_effect=interrupted_urlopen,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                provider.complete(
+                    messages=[{"role": "user", "content": "cancel"}],
+                    tools=[],
+                )
+        self.assertEqual(len(calls), 1)
+
     def test_provider_errors_are_redacted(self):
         message = redact('api_key=sk-1234567890 secret=visible token=abc123')
         self.assertIn('api_key=[REDACTED]', message)

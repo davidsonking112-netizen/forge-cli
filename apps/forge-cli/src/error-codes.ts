@@ -2,6 +2,7 @@ export const FORGE_EXIT_CODES = {
   success: 0,
   operationFailed: 1,
   usageOrSafetyBlocked: 2,
+  cancelled: 130,
 } as const;
 
 export const FORGE_ERROR_CODES = {
@@ -67,6 +68,12 @@ export function errorReference(): {
         name: "usage-or-safety-blocked",
         meaning:
           "Arguments, configuration, workspace, interactivity, or safety preconditions prevented the command from running.",
+      },
+      {
+        code: FORGE_EXIT_CODES.cancelled,
+        name: "cancelled",
+        meaning:
+          "The operator interrupted the run, normally with Ctrl-C; no pending mutation is replayed.",
       },
     ],
     structuredErrorCodes: Object.entries(FORGE_ERROR_CODES).map(

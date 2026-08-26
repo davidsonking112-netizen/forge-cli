@@ -37,12 +37,16 @@ export class DaytonaClient {
     return { configured: this.isConfigured(), apiUrl: this.apiUrl };
   }
 
-  public async getSandbox(id?: string): Promise<DaytonaResult> {
+  public async getSandbox(
+    id?: string,
+    signal?: AbortSignal,
+  ): Promise<DaytonaResult> {
     return this.request(
       id ? `/sandbox/${encodeURIComponent(validateSandboxId(id))}` : "/sandbox",
       {
         method: "GET",
       },
+      signal,
     );
   }
 
@@ -53,6 +57,7 @@ export class DaytonaClient {
       language?: "python" | "typescript" | "javascript";
       autoDeleteInterval?: number;
     } = {},
+    signal?: AbortSignal,
   ): Promise<DaytonaResult> {
     if (!this.isConfigured()) return this.notConfigured();
     const body: Record<string, unknown> = {};
@@ -71,36 +76,53 @@ export class DaytonaClient {
         );
       body.autoDeleteInterval = options.autoDeleteInterval;
     }
-    return this.request("/sandbox", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    return this.request(
+      "/sandbox",
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+      signal,
+    );
   }
 
-  public async stopSandbox(id: string): Promise<DaytonaResult> {
+  public async stopSandbox(
+    id: string,
+    signal?: AbortSignal,
+  ): Promise<DaytonaResult> {
     return this.request(
       `/sandbox/${encodeURIComponent(validateSandboxId(id))}/stop`,
       {
         method: "POST",
       },
+      signal,
     );
   }
 
-  public async deleteSandbox(id: string): Promise<DaytonaResult> {
+  public async deleteSandbox(
+    id: string,
+    signal?: AbortSignal,
+  ): Promise<DaytonaResult> {
     return this.request(
       `/sandbox/${encodeURIComponent(validateSandboxId(id))}`,
       {
         method: "DELETE",
       },
+      signal,
     );
   }
 
   private async request(
     path: string,
     init: RequestInit,
+    signal?: AbortSignal,
   ): Promise<DaytonaResult> {
     if (!this.isConfigured()) return this.notConfigured();
     const controller = new AbortController();
+    const onAbort = (): void => controller.abort();
+    if (signal?.aborted)
+      return { ok: false, status: null, error: "Daytona request cancelled" };
+    signal?.addEventListener("abort", onAbort, { once: true });
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
       const response = await fetch(`${this.apiUrl}${path}`, {
@@ -141,13 +163,15 @@ export class DaytonaClient {
       return {
         ok: false,
         status: null,
-        error:
-          error instanceof Error
+        error: signal?.aborted
+          ? "Daytona request cancelled"
+          : error instanceof Error
             ? error.message.slice(0, 500)
             : "Daytona request failed",
       };
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
     }
   }
 

@@ -18,6 +18,7 @@ export interface ToolResult {
 export interface ToolRequest {
   tool: ToolName;
   arguments: Record<string, unknown>;
+  signal?: AbortSignal;
 }
 
 export interface ToolMetadata {
@@ -427,7 +428,10 @@ export class WorkspaceTools {
             durationMs: Date.now() - started,
           };
         case "process.run": {
-          const output = await this.runProcess(request.arguments);
+          const output = await this.runProcess(
+            request.arguments,
+            request.signal,
+          );
           return {
             ok: output.exitCode === 0,
             output,
@@ -814,6 +818,7 @@ export class WorkspaceTools {
 
   private async runProcess(
     args: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<{ command: string; exitCode: number; output: string }> {
     const command = String(args.command ?? "");
     if (!command) throw new Error("Command is required");
@@ -833,6 +838,7 @@ export class WorkspaceTools {
     const shell = args.shell === true;
     if (shell && args.allowShell !== true)
       throw new Error("Shell execution requires explicit allowShell=true");
+    if (signal?.aborted) throw new Error("Command cancelled");
     return await new Promise((resolve, reject) => {
       const child = spawn(command, commandArgs, {
         cwd: this.root,
@@ -854,16 +860,36 @@ export class WorkspaceTools {
       };
       child.stdout.on("data", append);
       child.stderr.on("data", append);
+      let settled = false;
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const onAbort = (): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        child.kill("SIGTERM");
+        reject(new Error("Command cancelled"));
+      };
       const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         child.kill("SIGTERM");
         reject(new Error(`Command timed out after ${timeoutMs}ms`));
       }, timeoutMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
       child.on("error", (error) => {
-        clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        cleanup();
         reject(error);
       });
       child.on("close", (code) => {
-        clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        cleanup();
         resolve({
           command: [command, ...commandArgs].join(" "),
           exitCode: code ?? 1,

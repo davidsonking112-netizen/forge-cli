@@ -4,13 +4,15 @@ This document defines the stable automation contract for Forge CLI scripts and c
 
 ## Exit codes
 
-Forge uses a deliberately small process exit-code vocabulary. Scripts should branch on the numeric exit code and use `--output json` or the command’s documented machine-readable output for details. Human-readable text on stdout or stderr is not a stable parsing interface.
+Forge uses a deliberately small process exit-code vocabulary. The cancellation code follows the conventional shell interpretation of an interrupt (`128 + SIGINT`).
+Scripts should branch on the numeric exit code and use `--output json` or the command’s documented machine-readable output for details. Human-readable text on stdout or stderr is not a stable parsing interface.
 
 | Exit code | Stable name               | Meaning                                                                                                                                                                                                                                                      | Typical automation response                                                                              |
 | --------: | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
 |       `0` | `success`                 | The requested command completed successfully. A read-only command may have completed with warnings that do not prevent the requested inspection.                                                                                                             | Continue. If the command produces JSON, parse stdout as the documented result.                           |
 |       `1` | `operation-failed`        | The command was recognized and attempted, but an operational condition failed. Examples include an unavailable provider, failed process, failed verification, missing session data, or unsuccessful optional integration operation.                          | Stop or retry according to the command and structured error details. Do not assume a mutation succeeded. |
 |       `2` | `usage-or-safety-blocked` | Arguments, configuration, workspace, interactivity, or a safety precondition prevented execution. This includes malformed usage, missing required approval context, non-interactive mutation attempts, denied safety decisions, and bounded input rejection. | Correct the invocation or obtain explicit user approval. Do not automatically retry unchanged input.     |
+|     `130` | `cancelled`               | The operator interrupted an active run, normally with Ctrl-C. Forge aborts the active worker/tool boundary where supported, records cancellation when sessions are persisted, and does not replay pending mutations.                                         | Stop the workflow and inspect the session/audit record. Retry only as a new, deliberate run.             |
 
 The exit code does not grant permission. A successful read-only command does not imply that a later write, process, GitHub, Daytona, or MCP operation is approved. Every mutation and external action remains subject to Forge’s existing approval and global-deny rules.
 
@@ -59,7 +61,10 @@ For ACP, the transport contract is JSON-RPC/JSONL rather than the top-level CLI 
 
 ## Safety and retry rules
 
-Forge intentionally does not provide a generic “force” exit code. A `2` result should never be changed to `0` by suppressing an approval or by automatically switching to a less restrictive profile. A retry loop should be bounded and should preserve the same global safety ceiling. If a command reports `APPROVAL_DENIED`, the correct next action is to ask the operator, not to replay the action.
+Forge intentionally does not provide a generic “force” exit code. Ctrl-C is handled as cancellation rather than approval denial. During an interactive approval prompt, the prompt is closed and the run exits with `130`; it does not approve or replay the proposed action. During a provider call, the Node supervisor terminates the worker so the provider request is not allowed to continue as an uncontrolled background operation. The Python provider path does not swallow `KeyboardInterrupt`.
+
+For local subprocesses, the supervisor passes an abort signal to the active process boundary; cancellation requests termination and rejects the pending tool operation. Process-group behavior can differ across operating systems, so the platform matrix remains part of release verification. MCP requests already support abort signals and pending-request rejection. Daytona HTTP operations accept an abort signal and classify caller-driven cancellation without contacting a real service in tests.
+A `2` result should never be changed to `0` by suppressing an approval or by automatically switching to a less restrictive profile. A retry loop should be bounded and should preserve the same global safety ceiling. If a command reports `APPROVAL_DENIED`, the correct next action is to ask the operator, not to replay the action.
 
 A process exit of `0` is also not proof that a remote action occurred. For example, a read-only status command can succeed while reporting that an optional integration is unavailable, and a plan command can succeed while explicitly making no changes. Automation should inspect the command’s structured fields such as `ok`, `status`, `changedFiles`, `verification`, and `readOnly` where provided.
 

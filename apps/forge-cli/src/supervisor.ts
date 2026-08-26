@@ -43,6 +43,7 @@ export interface RunOptions {
   policyPack?: PolicyPack;
   autonomyProfile?: AutonomyProfileName;
   recovery?: RecoveryAssessment;
+  signal?: AbortSignal;
   revokeApprovalScope?: () => boolean;
   onEvent?: (event: ForgeEvent) => void;
   approve?: (
@@ -139,6 +140,11 @@ export class ForgeSupervisor {
     session.workspaceFingerprint = workspaceFingerprint;
     if (options.record !== false) await this.sessions.save(session);
     const worker = this.startWorker(options);
+    const abortWorker = (): void => {
+      if (!worker.killed) worker.kill("SIGTERM");
+    };
+    if (options.signal?.aborted) abortWorker();
+    else options.signal?.addEventListener("abort", abortWorker, { once: true });
     let workerError: Error | undefined;
     worker.on("error", (error) => {
       workerError = error instanceof Error ? error : new Error(String(error));
@@ -217,7 +223,34 @@ export class ForgeSupervisor {
               approved = true;
               decision = "approve-session";
             } else if (options.approve) {
-              decision = await options.approve(event);
+              if (options.signal?.aborted) decision = "cancel";
+              else if (!options.signal) decision = await options.approve(event);
+              else {
+                decision = await new Promise((resolve, reject) => {
+                  let settled = false;
+                  const finish = (
+                    value:
+                      "approve-once" | "approve-session" | "deny" | "cancel",
+                  ): void => {
+                    if (settled) return;
+                    settled = true;
+                    options.signal?.removeEventListener("abort", onAbort);
+                    resolve(value);
+                  };
+                  const onAbort = (): void => finish("cancel");
+                  options.signal?.addEventListener("abort", onAbort, {
+                    once: true,
+                  });
+                  options.approve!(event)
+                    .then(finish)
+                    .catch((error: unknown) => {
+                      if (settled) return;
+                      settled = true;
+                      options.signal?.removeEventListener("abort", onAbort);
+                      reject(error);
+                    });
+                });
+              }
               approved =
                 decision === "approve-once" || decision === "approve-session";
               if (decision === "approve-session") {
@@ -242,12 +275,13 @@ export class ForgeSupervisor {
               : {}),
           });
           if (decision === "cancel") {
-            send(
-              this.cancelEvent(
-                session.id,
-                "User cancelled the requested operation",
-              ),
-            );
+            if (!options.signal?.aborted)
+              send(
+                this.cancelEvent(
+                  session.id,
+                  "User cancelled the requested operation",
+                ),
+              );
             continue;
           }
           const result =
@@ -255,6 +289,7 @@ export class ForgeSupervisor {
               ? await tools.execute({
                   tool: event.tool,
                   arguments: event.arguments,
+                  ...(options.signal ? { signal: options.signal } : {}),
                 })
               : {
                   ok: false,
@@ -308,17 +343,28 @@ export class ForgeSupervisor {
     send(startEvent);
     await processing;
     if (!sessionResult) {
-      if (options.record !== false)
-        await this.sessions.markInterrupted(session);
+      if (options.record !== false) {
+        if (options.signal?.aborted) {
+          await this.sessions.append(
+            session,
+            this.cancelEvent(session.id, "Run cancelled by operator"),
+          );
+        } else {
+          await this.sessions.markInterrupted(session);
+        }
+      }
       sessionResult = {
         sessionId: session.id,
-        status: "failed",
-        summary: workerError
-          ? `The worker failed: ${workerError.message}`
-          : "The worker exited before completing the session.",
+        status: options.signal?.aborted ? "cancelled" : "failed",
+        summary: options.signal?.aborted
+          ? "Run cancelled by operator. No pending mutation was replayed."
+          : workerError
+            ? `The worker failed: ${workerError.message}`
+            : "The worker exited before completing the session.",
         changedFiles: [],
       };
     }
+    options.signal?.removeEventListener("abort", abortWorker);
     if (!worker.killed) worker.kill();
     return sessionResult;
   }

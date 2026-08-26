@@ -2086,19 +2086,41 @@ async function runTask(
   const interactive =
     !isJson && args.command === "interactive" && Boolean(input.isTTY);
   const rl = interactive ? createInterface({ input, output }) : undefined;
+  const cancellation = new AbortController();
+  let interrupted = false;
+  const onSigint = (): void => {
+    interrupted = true;
+    cancellation.abort();
+    rl?.close();
+  };
+  process.once("SIGINT", onSigint);
   const tui =
     interactive && args.flags.simple !== true ? new FullScreenTui() : undefined;
+  const cleanupCancellation = (): void => {
+    process.removeListener("SIGINT", onSigint);
+    rl?.close();
+    tui?.stop();
+  };
   if (tui) tui.start();
-  if (!prompt && interactive && rl)
-    prompt = (await rl.question("What should Forge do? ")).trim();
-  if (!prompt) {
-    if (rl) rl.close();
-    console.error(
-      args.command === "plan"
-        ? "Usage: forge plan <prompt>"
-        : "Usage: forge run --prompt <prompt>",
-    );
-    return 2;
+  try {
+    if (!prompt && interactive && rl)
+      prompt = (await rl.question("What should Forge do? ")).trim();
+    if (!prompt) {
+      console.error(
+        args.command === "plan"
+          ? "Usage: forge plan <prompt>"
+          : "Usage: forge run --prompt <prompt>",
+      );
+      cleanupCancellation();
+      return 2;
+    }
+  } catch (error) {
+    cleanupCancellation();
+    if (interrupted || cancellation.signal.aborted) {
+      console.error("Forge run cancelled by operator.");
+      return 130;
+    }
+    throw error;
   }
   const approve =
     interactive && rl
@@ -2141,6 +2163,7 @@ async function runTask(
       ...(systemPrompt ? { systemPrompt } : {}),
       policy: "safe" as const,
       json: isJson,
+      signal: cancellation.signal,
       onEvent: (event: ForgeEvent) => {
         if (tui) tui.handle(event);
         else renderEvent(event, isJson);
@@ -2184,6 +2207,7 @@ async function runTask(
       },
     };
     const result = await supervisor.run(runOptions);
+    if (cancellation.signal.aborted || interrupted) return 130;
     const sandboxId = flagString(args.flags, "daytona-sandbox");
     const cleanup = flagString(args.flags, "daytona-cleanup");
     if (cleanup && !sandboxId)
@@ -2224,11 +2248,14 @@ async function runTask(
     }
     return result.status === "completed" ? 0 : 1;
   } catch (error) {
+    if (interrupted || cancellation.signal.aborted) {
+      console.error("Forge run cancelled by operator.");
+      return 130;
+    }
     console.error(error instanceof Error ? error.message : String(error));
     return 1;
   } finally {
-    if (rl) rl.close();
-    if (tui) tui.stop();
+    cleanupCancellation();
   }
 }
 

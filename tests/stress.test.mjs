@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import {
   mkdtemp,
   mkdir,
@@ -19,6 +20,7 @@ import {
 import { McpStdioClient } from "../dist/apps/forge-cli/src/mcp.js";
 import { SessionStore } from "../dist/apps/forge-cli/src/sessions.js";
 import { ForgeSupervisor } from "../dist/apps/forge-cli/src/supervisor.js";
+import { DaytonaClient } from "../dist/apps/forge-cli/src/daytona.js";
 import { createEnvelope } from "../dist/packages/protocol/src/index.js";
 import { WorkspaceTools } from "../dist/apps/forge-cli/src/tools.js";
 
@@ -86,6 +88,164 @@ test("process failures and timeouts become bounded tool failures", async () => {
     assert.match(timeout.error?.message ?? "", /timed out/i);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("approved subprocesses stop on caller cancellation", async () => {
+  const root = await fixture();
+  const marker = path.join(root, "cancelled-marker.txt");
+  const controller = new AbortController();
+  try {
+    const pending = new WorkspaceTools(root).execute({
+      tool: "process.run",
+      arguments: {
+        command: process.execPath,
+        args: [
+          "-e",
+          "setTimeout(() => require('node:fs').writeFileSync(process.argv[1], 'late'), 500)",
+          marker,
+        ],
+        timeoutMs: 5_000,
+      },
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 30);
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, "TOOL_EXECUTION_ERROR");
+    assert.match(result.error?.message ?? "", /cancelled/i);
+    await new Promise((resolve) => setTimeout(resolve, 650));
+    await assert.rejects(readFile(marker, "utf8"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("approval cancellation stops a proposed mutation", async () => {
+  const root = await fixture();
+  const events = [];
+  try {
+    const result = await new ForgeSupervisor().run({
+      prompt: "Create file cancelled.txt",
+      workspace: root,
+      onEvent: (event) => events.push(event),
+      approve: async () => "cancel",
+    });
+    assert.equal(result.status, "cancelled");
+    await assert.rejects(readFile(path.join(root, "cancelled.txt"), "utf8"));
+    assert.ok(
+      events.some(
+        (event) =>
+          event.type === "approval.result" && event.decision === "cancel",
+      ),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Ctrl-C interrupts an in-flight provider call", async () => {
+  const root = await fixture();
+  const server = createServer(() => {
+    // Hold the provider request open until Forge is interrupted.
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const requestReceived = new Promise((resolve) =>
+    server.once("request", resolve),
+  );
+  const cli = path.resolve("dist/apps/forge-cli/src/main.js");
+  const child = spawn(
+    process.execPath,
+    [cli, "run", "--prompt", "inspect the repository", "--workspace", root],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        FORGE_PROVIDER: "openai-compatible",
+        FORGE_API_KEY: "fixture-provider-key",
+        FORGE_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+        FORGE_MODEL: "fixture-model",
+        FORGE_PROVIDER_RETRIES: "0",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  try {
+    await Promise.race([
+      requestReceived,
+      new Promise((_, reject) =>
+        setTimeout(
+          () => reject(new Error("provider fixture was not called")),
+          5_000,
+        ),
+      ),
+    ]);
+    child.kill("SIGINT");
+    const result = await new Promise((resolve) =>
+      child.once("close", (code, signal) => resolve({ code, signal })),
+    );
+    assert.equal(result.code, 130);
+  } finally {
+    if (!child.killed) child.kill("SIGTERM");
+    await new Promise((resolve) => server.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("SIGINT-style abort resolves an in-flight approval", async () => {
+  const root = await fixture();
+  const controller = new AbortController();
+  let approvalStarted = false;
+  try {
+    const pending = new ForgeSupervisor().run({
+      prompt: "Create file approval-cancelled.txt",
+      workspace: root,
+      signal: controller.signal,
+      approve: async () => {
+        approvalStarted = true;
+        return await new Promise(() => {});
+      },
+    });
+    for (let attempt = 0; attempt < 50 && !approvalStarted; attempt += 1)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(approvalStarted, true);
+    controller.abort();
+    const result = await pending;
+    assert.equal(result.status, "cancelled");
+    await assert.rejects(
+      readFile(path.join(root, "approval-cancelled.txt"), "utf8"),
+    );
+  } finally {
+    controller.abort();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Daytona requests stop on caller cancellation", async () => {
+  const originalFetch = globalThis.fetch;
+  const controller = new AbortController();
+  try {
+    globalThis.fetch = async (_input, init) =>
+      await new Promise((_resolve, reject) => {
+        init.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      });
+    const pending = new DaytonaClient({
+      apiKey: "fixture-secret",
+      apiUrl: "https://daytona.invalid/api",
+    }).getSandbox("sandbox-1", controller.signal);
+    setTimeout(() => controller.abort(), 30);
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.equal(result.status, null);
+    assert.equal(result.error, "Daytona request cancelled");
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 
@@ -649,7 +809,7 @@ test("forge errors exposes the stable automation contract", async () => {
   assert.equal(reference.schemaVersion, 1);
   assert.deepEqual(
     reference.exitCodes.map((entry) => entry.code),
-    [0, 1, 2],
+    [0, 1, 2, 130],
   );
   assert.ok(
     reference.structuredErrorCodes.some(
