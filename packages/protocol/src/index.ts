@@ -73,6 +73,17 @@ export interface AgentTextEvent extends BaseEvent {
   text: string;
 }
 
+export interface ScratchpadItem {
+  key: string;
+  value: string;
+  status: "todo" | "active" | "done" | "blocked";
+}
+
+export interface AgentScratchpadEvent extends BaseEvent {
+  type: "agent.scratchpad";
+  items: ScratchpadItem[];
+}
+
 export interface AgentDelegationEvent extends BaseEvent {
   type: "agent.delegation";
   role: "explorer" | "implementer" | "tester" | "reviewer";
@@ -175,6 +186,7 @@ export type ForgeEvent =
   | SessionStartEvent
   | UserPromptEvent
   | AgentTextEvent
+  | AgentScratchpadEvent
   | AgentDelegationEvent
   | AgentPlanEvent
   | ToolProposalEvent
@@ -248,7 +260,19 @@ function validRecovery(value: unknown): value is RecoveryAssessment {
       String(recovery.decision),
     ) &&
     (recovery.stepId === undefined || protocolString(recovery.stepId, 100)) &&
-    protocolString(recovery.reason, 500)
+    protocolString(recovery.reason, 500) &&
+    [
+      "unchanged-active-step",
+      "unchanged-no-active-step",
+      "completed-session",
+      "legacy-session",
+      "workspace-drift",
+      "workspace-missing",
+    ].includes(String(recovery.reasonCode)) &&
+    typeof recovery.workspaceChanged === "boolean" &&
+    ["resume", "re-plan", "inspect-workspace"].includes(
+      String(recovery.nextAction),
+    )
   );
 }
 
@@ -283,6 +307,20 @@ export function isForgeEvent(value: unknown): value is ForgeEvent {
       );
     case "agent.text":
       return protocolString(candidate.text, 100_000);
+    case "agent.scratchpad":
+      return (
+        protocolArray(candidate.items, 64) &&
+        candidate.items.every((item) => {
+          if (!item || typeof item !== "object" || Array.isArray(item))
+            return false;
+          const entry = item as Record<string, unknown>;
+          return (
+            protocolString(entry.key, 100) &&
+            protocolString(entry.value, 1_000) &&
+            ["todo", "active", "done", "blocked"].includes(String(entry.status))
+          );
+        })
+      );
     case "agent.delegation":
       return (
         ["explorer", "implementer", "tester", "reviewer"].includes(

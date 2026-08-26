@@ -6,6 +6,7 @@ import type {
   ForgeEvent,
   PlanStep,
   RecoveryAssessment,
+  ScratchpadItem,
 } from "../../../packages/protocol/src/index.js";
 
 export type SessionStatus =
@@ -43,6 +44,7 @@ export interface SessionRecord {
   resumeCount: number;
   workspaceFingerprint?: string;
   recovery?: RecoveryAssessment;
+  scratchpad: ScratchpadItem[];
   plan?: PlanSnapshot;
   journal: StepJournalEntry[];
   verification: CheckResult[];
@@ -73,6 +75,7 @@ export class SessionStore {
       status: "running",
       resumeCount: 0,
       journal: [],
+      scratchpad: [],
       verification: [],
       events: [],
     };
@@ -82,6 +85,7 @@ export class SessionStore {
 
   public async save(record: SessionRecord): Promise<void> {
     if (!Array.isArray(record.journal)) record.journal = [];
+    if (!Array.isArray(record.scratchpad)) record.scratchpad = [];
     if (!Array.isArray(record.verification)) record.verification = [];
     if (!/^[0-9a-f-]{36}$/i.test(record.id))
       throw new Error("Invalid session ID");
@@ -93,6 +97,13 @@ export class SessionStore {
           ...entry,
           description: entry.description.slice(0, 500),
           proposalIds: entry.proposalIds.slice(-32),
+        })),
+        scratchpad: record.scratchpad.slice(0, 64).map((item) => ({
+          key: String(item.key ?? "").slice(0, 100),
+          value: String(item.value ?? "").slice(0, 1_000),
+          status: ["todo", "active", "done", "blocked"].includes(item.status)
+            ? item.status
+            : "todo",
         })),
         verification: record.verification.slice(0, 32).map((check) => ({
           ...check,
@@ -142,6 +153,13 @@ export class SessionStore {
         updatedAt: now,
         proposalIds: [],
         toolResults: 0,
+      }));
+    }
+    if (sanitized.type === "agent.scratchpad") {
+      record.scratchpad = sanitized.items.slice(0, 64).map((item) => ({
+        key: item.key.slice(0, 100),
+        value: item.value.slice(0, 1_000),
+        status: item.status,
       }));
     }
     if (sanitized.type === "tool.proposal") {
@@ -277,6 +295,15 @@ export class SessionStore {
       resumeCount: Number.isSafeInteger(record.resumeCount)
         ? record.resumeCount
         : 0,
+      scratchpad: Array.isArray(record.scratchpad)
+        ? record.scratchpad.slice(0, 64).map((item) => ({
+            key: String(item.key ?? "").slice(0, 100),
+            value: String(item.value ?? "").slice(0, 1_000),
+            status: ["todo", "active", "done", "blocked"].includes(item.status)
+              ? item.status
+              : "todo",
+          }))
+        : [],
       journal: Array.isArray(record.journal)
         ? record.journal.slice(0, 64).map((entry) => ({
             ...entry,

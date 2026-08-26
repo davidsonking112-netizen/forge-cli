@@ -235,6 +235,21 @@ test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MC
       }),
     );
     const cli = path.resolve("dist/apps/forge-cli/src/main.js");
+    const help = spawnSync(process.execPath, [cli, "--help"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    assert.equal(help.status, 0);
+    assert.match(help.stdout, /github status/);
+    assert.match(help.stdout, /connect/);
+    assert.match(help.stdout, /create/);
+    const githubCreate = spawnSync(
+      process.execPath,
+      [cli, "github", "create", "owner/project", "--workspace", root],
+      { cwd: process.cwd(), encoding: "utf8" },
+    );
+    assert.equal(githubCreate.status, 2);
+    assert.match(githubCreate.stderr, /interactive YES confirmation/i);
     const profiles = spawnSync(process.execPath, [cli, "profiles"], {
       cwd: process.cwd(),
       encoding: "utf8",
@@ -509,6 +524,7 @@ test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MC
       assert.equal(inspection.status, 0);
       assert.match(inspection.stdout, /journal/);
       assert.match(inspection.stdout, /workspaceFingerprint/);
+      assert.match(inspection.stdout, /scratchpad/);
       const recovery = spawnSync(
         process.execPath,
         [cli, "session", "recovery", sessionId],

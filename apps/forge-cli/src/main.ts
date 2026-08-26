@@ -27,6 +27,7 @@ import { McpStdioClient } from "./mcp.js";
 import { summarizeUnifiedDiff } from "./diff.js";
 import { loadPolicyPack } from "./policy.js";
 import { loadExtensionManifests } from "./extensions.js";
+import { prepareGitHubAction, runGitHubCommand } from "./github.js";
 import {
   getAutonomyProfile,
   listAutonomyProfiles,
@@ -39,7 +40,7 @@ import {
   readRepositoryIndex,
 } from "./index.js";
 
-const VERSION = "0.9.0";
+const VERSION = "0.9.5";
 
 function usage(): string {
   return `Forge CLI v${VERSION}
@@ -54,6 +55,7 @@ Usage:
   forge verify <session-id>                 Inspect structured verification evidence
   forge undo <checkpoint-id>              Restore a Forge-managed checkpoint
   forge git status|branch|stage|commit    Use approval-gated local Git workflows
+  forge github status|connect|create|clone|push  Use explicit GitHub workflows
   forge git prepare-pr [title]            Prepare a local review-ready PR draft
   forge mcp validate                       Validate MCP config without launching servers
   forge mcp list|enable|disable|tools|call Use explicitly enabled MCP stdio servers
@@ -115,6 +117,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     "index",
     "extensions",
     "git",
+    "github",
     "help",
   ]);
   const command = first && knownCommands.has(first) ? first : "interactive";
@@ -567,6 +570,7 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
           resumeCount: session.resumeCount,
           workspaceFingerprint: session.workspaceFingerprint,
           recovery: session.recovery,
+          scratchpad: session.scratchpad,
           plan: session.plan,
           journal: session.journal,
           verification: session.verification,
@@ -692,6 +696,71 @@ async function gitCommand(args: ParsedArgs): Promise<number> {
     return result.ok ? 0 : 1;
   } finally {
     rl.close();
+  }
+}
+
+async function githubCommand(args: ParsedArgs): Promise<number> {
+  const action = (args.positional[0] ?? "status") as
+    "status" | "connect" | "create" | "clone" | "push";
+  if (!["status", "connect", "create", "clone", "push"].includes(action)) {
+    console.error(
+      "Usage: forge github status|connect|create <owner/name>|clone <owner/name> --destination <dir>|push [branch]",
+    );
+    return 2;
+  }
+  const workspace = path.resolve(
+    flagString(args.flags, "workspace", process.cwd()),
+  );
+  try {
+    const prepared = await prepareGitHubAction(action, workspace, {
+      repository: args.positional[1],
+      destination: flagString(args.flags, "destination"),
+      branch: args.positional[1],
+      push: args.flags.push === true,
+    });
+    if (action === "status") {
+      const result = await runGitHubCommand(
+        prepared.command,
+        prepared.cwd,
+        action,
+      );
+      console.log(JSON.stringify(result, null, 2));
+      return result.ok ? 0 : 1;
+    }
+    if (!input.isTTY) {
+      console.error(
+        "GitHub connection and remote repository actions require an interactive YES confirmation.",
+      );
+      return 2;
+    }
+    const rl = createInterface({ input, output });
+    try {
+      const displayed = prepared.command.join(" ");
+      console.log(`Proposed GitHub action: ${displayed}`);
+      const answer = (
+        await rl.question(
+          "This may authenticate, create, clone, or push to GitHub. Type YES to continue: ",
+        )
+      ).trim();
+      if (answer !== "YES") {
+        console.log("GitHub action denied.");
+        return 1;
+      }
+      const result = await runGitHubCommand(
+        prepared.command,
+        prepared.cwd,
+        action,
+        true,
+      );
+      if (!result.ok) console.error(result.output);
+      else console.log(result.output);
+      return result.ok ? 0 : 1;
+    } finally {
+      rl.close();
+    }
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
   }
 }
 
@@ -1396,6 +1465,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (args.command === "index") return indexCommand(args);
   if (args.command === "extensions") return extensionsCommand(args);
   if (args.command === "git") return gitCommand(args);
+  if (args.command === "github") return githubCommand(args);
   return runTask(args);
 }
 

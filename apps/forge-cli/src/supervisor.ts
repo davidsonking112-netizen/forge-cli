@@ -26,7 +26,7 @@ import {
 import type { PolicyPack } from "./policy.js";
 import { getAutonomyProfile, type AutonomyProfileName } from "./profiles.js";
 
-const FORGE_VERSION = "0.9.0";
+const FORGE_VERSION = "0.9.5";
 
 export interface RunOptions {
   prompt: string;
@@ -100,6 +100,7 @@ export class ForgeSupervisor {
             status: "running",
             resumeCount: 0,
             journal: [],
+            scratchpad: [],
             verification: [],
             events: [],
           }

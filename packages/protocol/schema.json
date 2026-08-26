@@ -20,6 +20,28 @@
       }
     },
     {
+      "if": { "properties": { "type": { "const": "agent.scratchpad" } } },
+      "then": {
+        "required": ["items"],
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "required": ["key", "value", "status"],
+              "properties": {
+                "key": { "type": "string", "maxLength": 100 },
+                "value": { "type": "string", "maxLength": 1000 },
+                "status": { "enum": ["todo", "active", "done", "blocked"] }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      }
+    },
+    {
       "if": { "properties": { "type": { "const": "agent.delegation" } } },
       "then": {
         "required": ["role", "status", "turns", "text"],

@@ -19,6 +19,7 @@ import {
   validateExternalServerConfig,
 } from "../dist/apps/forge-cli/src/integrations.js";
 import { loadExtensionManifests } from "../dist/apps/forge-cli/src/extensions.js";
+import { prepareGitHubAction } from "../dist/apps/forge-cli/src/github.js";
 import { McpStdioClient } from "../dist/apps/forge-cli/src/mcp.js";
 import { ForgeSupervisor } from "../dist/apps/forge-cli/src/supervisor.js";
 import { SessionStore } from "../dist/apps/forge-cli/src/sessions.js";
@@ -57,6 +58,50 @@ async function tempWorkspace() {
   return directory;
 }
 
+test("v0.95 GitHub actions are explicit, private by default, and path bounded", async () => {
+  const workspace = await tempWorkspace();
+  try {
+    const create = await prepareGitHubAction("create", workspace, {
+      repository: "owner/forge-sandbox",
+    });
+    assert.deepEqual(create.command, [
+      "gh",
+      "repo",
+      "create",
+      "owner/forge-sandbox",
+      "--private",
+      "--source",
+      workspace,
+      "--remote",
+      "origin",
+    ]);
+    const clone = await prepareGitHubAction("clone", workspace, {
+      repository: "owner/project",
+      destination: "clones/project",
+    });
+    assert.equal(clone.command[0], "gh");
+    assert.equal(path.basename(clone.command.at(-1)), "project");
+    assert.equal(path.basename(path.dirname(clone.command.at(-1))), "clones");
+    await assert.rejects(
+      prepareGitHubAction("clone", workspace, {
+        repository: "owner/project",
+        destination: "../outside",
+      }),
+      /inside the approved workspace/i,
+    );
+    const push = await prepareGitHubAction("push", workspace);
+    assert.deepEqual(push.command, ["git", "push", "origin", "HEAD"]);
+    await assert.rejects(
+      prepareGitHubAction("push", workspace, {
+        branch: "bad branch",
+      }),
+      /branch is invalid/i,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("v0.9 protocol validation rejects malformed and unbounded event data", () => {
   const valid = {
     ...createEnvelope("agent.text", "session-1"),
@@ -65,6 +110,22 @@ test("v0.9 protocol validation rejects malformed and unbounded event data", () =
   };
   assert.equal(isForgeEvent(valid), true);
   assert.deepEqual(parseForgeEvent(JSON.stringify(valid)), valid);
+  const scratchpad = {
+    ...createEnvelope("agent.scratchpad", "session-1"),
+    type: "agent.scratchpad",
+    items: [{ key: "current-step", value: "Inspect", status: "active" }],
+  };
+  assert.equal(isForgeEvent(scratchpad), true);
+  assert.throws(
+    () =>
+      parseForgeEvent(
+        JSON.stringify({
+          ...scratchpad,
+          items: [{ key: "bad", value: "bad", status: "unknown" }],
+        }),
+      ),
+    /invalid/i,
+  );
   assert.throws(
     () => parseForgeEvent(JSON.stringify({ ...valid, type: "unknown" })),
     /invalid/i,
@@ -105,6 +166,7 @@ test("v0.9 sessions persist journals and classify safe recovery decisions", asyn
     assert.ok(record.journal.length >= 4);
     assert.ok(record.journal.some((entry) => entry.status === "complete"));
     assert.ok(record.journal.some((entry) => entry.status === "pending"));
+    assert.ok(record.scratchpad.some((item) => item.key === "current-step"));
     const start = record.events.find((event) => event.type === "session.start");
     assert.equal(start?.type, "session.start");
     assert.equal(start?.workspaceFingerprint, record.workspaceFingerprint);
@@ -1206,6 +1268,11 @@ test("supervisor completes a mock read-only plan flow", async () => {
     });
     assert.equal(result.status, "completed");
     assert.ok(events.some((event) => event.type === "agent.plan"));
+    const scratchpad = events.find(
+      (event) => event.type === "agent.scratchpad",
+    );
+    assert.ok(scratchpad);
+    assert.ok(scratchpad.items.some((item) => item.key === "current-step"));
     assert.ok(
       events.some(
         (event) =>

@@ -61,7 +61,7 @@ export class FullScreenTui {
   private draw(): void {
     if (!this.active) return;
     const width = Math.max(40, Math.min(process.stdout.columns ?? 100, 120));
-    const title = ` Forge CLI v0.9.0 | ${"local-first coding agent".padEnd(width - 21, " ")} `;
+    const title = ` Forge CLI v0.9.5 | ${"local-first coding agent".padEnd(width - 21, " ")} `;
     process.stdout.write(
       `\x1b[2J\x1b[H\x1b[1;36m${title.slice(0, width)}\x1b[0m\n`,
     );

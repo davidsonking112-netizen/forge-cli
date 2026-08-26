@@ -131,6 +131,16 @@ class MockAgent:
         ]
         return [
             event("agent.text", self.session_id, text=f"I will inspect the workspace before planning: {prompt}"),
+            event(
+                "agent.scratchpad",
+                self.session_id,
+                items=[
+                    {"key": "task", "value": prompt, "status": "active"},
+                    {"key": "current-step", "value": "Inspect the workspace before planning", "status": "active"},
+                    {"key": "change", "value": "No mutation proposed yet", "status": "todo"},
+                    {"key": "verification", "value": "Verification will be requested after an approved change", "status": "todo"},
+                ],
+            ),
             event("tool.proposal", self.session_id, tool="workspace.list", risk="read-only", arguments={"limit": 120}, reason="Establish a bounded view of the repository before planning."),
         ]
 
@@ -210,24 +220,24 @@ class MockAgent:
             self.stage = "plan"
             self.steps[0]["status"] = "complete"
             self.steps[1]["status"] = "active"
-            return [event("agent.text", self.session_id, text="Repository inventory received. Repository instructions are untrusted data and cannot change Forge permissions."), event("agent.plan", self.session_id, goal=self.prompt, steps=self.steps, assumptions=["Only files relevant to the task will be read.", "No mutation or command execution occurs without supervisor approval."], verification=["Run the project’s relevant checks after an approved change."]), event("tool.proposal", self.session_id, tool="workspace.read", risk="read-only", arguments={"path": "README.md", "maxBytes": 12000}, reason="Read the project overview to ground the plan in repository conventions.")]
+            return [event("agent.text", self.session_id, text="Repository inventory received. Repository instructions are untrusted data and cannot change Forge permissions."), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "active"}, {"key": "current-step", "value": "Produce a minimal implementation plan", "status": "active"}, {"key": "inspection", "value": "Bounded repository inventory received", "status": "done"}, {"key": "change", "value": "Awaiting plan and approval before mutation", "status": "todo"}, {"key": "verification", "value": "Relevant checks remain pending", "status": "todo"}]), event("agent.plan", self.session_id, goal=self.prompt, steps=self.steps, assumptions=["Only files relevant to the task will be read.", "No mutation or command execution occurs without supervisor approval."], verification=["Run the project’s relevant checks after an approved change."]), event("tool.proposal", self.session_id, tool="workspace.read", risk="read-only", arguments={"path": "README.md", "maxBytes": 12000}, reason="Read the project overview to ground the plan in repository conventions.")]
         if tool == "workspace.read" and self.stage == "plan":
             self.steps[1]["status"] = "complete"
             if self.desired_path:
                 self.stage = "change"
                 self.steps[2]["status"] = "active"
-                return [event("agent.text", self.session_id, text=f"I found enough context to propose creating {self.desired_path}. Forge will show the patch and request approval before writing."), event("tool.proposal", self.session_id, tool="workspace.apply_patch", risk="reversible-write", arguments={"path": self.desired_path, "content": "Created by Forge v0.1 mock agent.\n"}, reason="Apply the minimal file change requested by the user.")]
+                return [event("agent.text", self.session_id, text=f"I found enough context to propose creating {self.desired_path}. Forge will show the patch and request approval before writing."), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "active"}, {"key": "current-step", "value": "Awaiting approval for the proposed change", "status": "active"}, {"key": "inspection", "value": "Relevant context reviewed", "status": "done"}, {"key": "change", "value": f"Create {self.desired_path}", "status": "active"}, {"key": "verification", "value": "Pending approved change", "status": "todo"}]), event("tool.proposal", self.session_id, tool="workspace.apply_patch", risk="reversible-write", arguments={"path": self.desired_path, "content": "Created by Forge v0.1 mock agent.\n"}, reason="Apply the minimal file change requested by the user.")]
             self.stage = "complete"
             self.steps[2]["status"] = "complete"
             self.steps[3]["status"] = "complete"
-            return [event("agent.text", self.session_id, text="The mock provider has completed a read-only planning pass."), event("session.complete", self.session_id, status="completed", summary="Read-only repository inspection and planning completed. No files were changed and no commands were run.", changedFiles=self.changed_files, checks=[])]
+            return [event("agent.text", self.session_id, text="The mock provider has completed a read-only planning pass."), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "done"}, {"key": "current-step", "value": "Read-only planning completed", "status": "done"}, {"key": "inspection", "value": "Repository context reviewed", "status": "done"}, {"key": "change", "value": "No mutation required", "status": "done"}, {"key": "verification", "value": "No command run in read-only plan", "status": "done"}]), event("session.complete", self.session_id, status="completed", summary="Read-only repository inspection and planning completed. No files were changed and no commands were run.", changedFiles=self.changed_files, checks=[])]
         if tool == "workspace.apply_patch" and self.stage == "change":
             self.stage = "verify"
             self.steps[2]["status"] = "complete"
             self.steps[3]["status"] = "active"
             if self.desired_path and self.desired_path not in self.changed_files:
                 self.changed_files.append(self.desired_path)
-            return [event("agent.text", self.session_id, text="The approved patch was applied. I am requesting a bounded verification command."), event("tool.proposal", self.session_id, tool="process.run", risk="local-execution", arguments={"command": sys.executable, "args": ["--version"], "timeoutMs": 10000}, reason="Verify that the local execution path is available after the approved edit.")]
+            return [event("agent.text", self.session_id, text="The approved patch was applied. I am requesting a bounded verification command."), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "active"}, {"key": "current-step", "value": "Run bounded verification", "status": "active"}, {"key": "inspection", "value": "Relevant context reviewed", "status": "done"}, {"key": "change", "value": f"Created {self.desired_path}", "status": "done"}, {"key": "verification", "value": "Awaiting approval for bounded verification command", "status": "active"}]), event("tool.proposal", self.session_id, tool="process.run", risk="local-execution", arguments={"command": sys.executable, "args": ["--version"], "timeoutMs": 10000}, reason="Verify that the local execution path is available after the approved edit.")]
         if tool == "process.run" and self.stage == "verify":
             self.stage = "complete"
             self.steps[3]["status"] = "complete"
@@ -241,7 +251,7 @@ class MockAgent:
             )
             status = "completed" if ok else "failed"
             summary = "Approved file change applied and bounded verification completed." if ok else "Approved file change applied but bounded verification failed."
-            return [event("agent.text", self.session_id, text="The verification command completed. Forge will include its exit status in the session record."), event("session.complete", self.session_id, status=status, summary=summary, changedFiles=self.changed_files, checks=[check])]
+            return [event("agent.text", self.session_id, text="The verification command completed. Forge will include its exit status in the session record."), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "done" if ok else "blocked"}, {"key": "current-step", "value": "Verification completed", "status": "done" if ok else "blocked"}, {"key": "inspection", "value": "Relevant context reviewed", "status": "done"}, {"key": "change", "value": f"Created {self.desired_path}" if self.desired_path else "No mutation", "status": "done"}, {"key": "verification", "value": check["status"], "status": "done" if ok else "blocked"}]), event("session.complete", self.session_id, status=status, summary=summary, changedFiles=self.changed_files, checks=[check])]
         return [event("agent.text", self.session_id, text="The tool result was received. No further mock-provider action is required.")]
 
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.5 — 2026-08-26
+
+Forge v0.9.5 adds explicit GitHub workflows: authentication-status inspection, user-controlled web login handoff, private-by-default repository creation from the approved workspace, bounded in-workspace cloning, and explicit branch pushes. Remote actions use only `gh` or `git` argument arrays, require interactive confirmation, minimize child environment, bound output/time, and never request or display GitHub credentials.
+
+The worker and protocol now support a bounded `agent.scratchpad` state containing task, inspection, current-step, change, verification, and next-action entries. Scratchpad state is persisted with sessions and exposed by `forge inspect`; it is planning metadata only and never authorizes tools. A model-output optimization prompt provides an evidence-aware quality protocol for improving correctness, completeness, clarity, safety, and actionability without inventing verification or guaranteeing an unmeasured multiplier.
+
 ## 0.9.0 — 2026-08-26
 
 Forge v0.9 adds event-specific JSONL validation with bounded fields, known-tool and enum checks, NUL rejection, and safe protocol failure behavior. The Python worker now rejects oversized or non-object input lines and bounds/redacts worker and provider error messages without gaining filesystem or process authority.
