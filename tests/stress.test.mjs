@@ -21,6 +21,11 @@ import { McpStdioClient } from "../dist/apps/forge-cli/src/mcp.js";
 import { SessionStore } from "../dist/apps/forge-cli/src/sessions.js";
 import { ForgeSupervisor } from "../dist/apps/forge-cli/src/supervisor.js";
 import { DaytonaClient } from "../dist/apps/forge-cli/src/daytona.js";
+import {
+  WorkspaceLockError,
+  acquireWorkspaceLock,
+  workspaceLockPath,
+} from "../dist/apps/forge-cli/src/locks.js";
 import { createEnvelope } from "../dist/packages/protocol/src/index.js";
 import { WorkspaceTools } from "../dist/apps/forge-cli/src/tools.js";
 
@@ -88,6 +93,61 @@ test("process failures and timeouts become bounded tool failures", async () => {
     assert.match(timeout.error?.message ?? "", /timed out/i);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace locks reject active contention and release cleanly", async () => {
+  const state = await mkdtemp(path.join(os.tmpdir(), "forge-lock-state-"));
+  const previous = process.env.XDG_STATE_HOME;
+  const root = await fixture();
+  process.env.XDG_STATE_HOME = state;
+  try {
+    const first = await acquireWorkspaceLock(root);
+    await assert.rejects(
+      acquireWorkspaceLock(root),
+      (error) =>
+        error instanceof WorkspaceLockError &&
+        error.code === "WORKSPACE_LOCKED",
+    );
+    await first.release();
+    const second = await acquireWorkspaceLock(root);
+    await second.release();
+    await assert.rejects(readFile(workspaceLockPath(root), "utf8"));
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+    await rm(state, { recursive: true, force: true });
+  }
+});
+
+test("workspace locks reclaim dead-process lock records", async () => {
+  const state = await mkdtemp(path.join(os.tmpdir(), "forge-stale-lock-"));
+  const previous = process.env.XDG_STATE_HOME;
+  const root = await fixture();
+  process.env.XDG_STATE_HOME = state;
+  try {
+    const lockPath = workspaceLockPath(root);
+    await mkdir(path.dirname(lockPath), { recursive: true });
+    await writeFile(
+      lockPath,
+      JSON.stringify({
+        pid: 999999,
+        startedAt: new Date().toISOString(),
+        workspace: root,
+        token: "dead-process-token",
+      }),
+    );
+    const lock = await acquireWorkspaceLock(root);
+    const record = JSON.parse(await readFile(lock.path, "utf8"));
+    assert.equal(record.workspace, root);
+    assert.notEqual(record.token, "dead-process-token");
+    await lock.release();
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+    await rm(state, { recursive: true, force: true });
   }
 });
 

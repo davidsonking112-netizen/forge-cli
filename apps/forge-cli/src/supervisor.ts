@@ -25,6 +25,7 @@ import {
 } from "./context.js";
 import type { PolicyPack } from "./policy.js";
 import { getAutonomyProfile, type AutonomyProfileName } from "./profiles.js";
+import { acquireWorkspaceLock } from "./locks.js";
 
 const FORGE_VERSION = "0.9.9";
 
@@ -92,6 +93,18 @@ export class ForgeSupervisor {
       throw new Error(
         "Approved workspace does not exist or is not a directory",
       );
+    const lock = await acquireWorkspaceLock(workspace);
+    try {
+      return await this.runUnlocked(options, workspace);
+    } finally {
+      await lock.release();
+    }
+  }
+
+  private async runUnlocked(
+    options: RunOptions,
+    workspace: string,
+  ): Promise<RunResult> {
     const timestamp = new Date().toISOString();
     const session: SessionRecord =
       options.record === false

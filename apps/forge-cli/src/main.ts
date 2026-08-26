@@ -31,6 +31,7 @@ import { prepareGitHubAction, runGitHubCommand } from "./github.js";
 import { DaytonaClient } from "./daytona.js";
 import { redactValue } from "./redaction.js";
 import { errorReference } from "./error-codes.js";
+import { WorkspaceLockError } from "./locks.js";
 import {
   getAutonomyProfile,
   listAutonomyProfiles,
@@ -2251,6 +2252,10 @@ async function runTask(
     if (interrupted || cancellation.signal.aborted) {
       console.error("Forge run cancelled by operator.");
       return 130;
+    }
+    if (error instanceof WorkspaceLockError) {
+      console.error(`[${error.code}] ${error.message}`);
+      return 2;
     }
     console.error(error instanceof Error ? error.message : String(error));
     return 1;

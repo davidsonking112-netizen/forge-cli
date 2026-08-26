@@ -32,6 +32,11 @@ export const FORGE_ERROR_CODES = {
     meaning: "A local commit operation failed.",
     retryable: true,
   },
+  workspaceLocked: {
+    category: "concurrency",
+    meaning: "Another active Forge process owns the approved workspace lock.",
+    retryable: true,
+  },
 } as const;
 
 export function errorReference(): {
