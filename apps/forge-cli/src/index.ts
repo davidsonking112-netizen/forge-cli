@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { buildRepositoryContext, type RepositoryContext } from "./context.js";
 
 const MAX_INDEX_BYTES = 1_000_000;
@@ -189,7 +189,13 @@ export async function buildRepositoryIndex(
   if (Buffer.byteLength(serialized, "utf8") > MAX_INDEX_BYTES)
     throw new Error("Repository index exceeds the local size limit");
   await fs.mkdir(stateDirectory(), { recursive: true, mode: 0o700 });
-  await fs.writeFile(indexPath(resolvedRoot), serialized, { mode: 0o600 });
+  const target = indexPath(resolvedRoot);
+  const temporary = `${target}.${randomUUID()}.tmp`;
+  await fs.writeFile(temporary, serialized, { mode: 0o600 });
+  await fs.rename(temporary, target).catch(async (error) => {
+    await fs.rm(temporary, { force: true });
+    throw error;
+  });
   return index;
 }
 
@@ -227,13 +233,27 @@ export async function readRepositoryIndex(
       refreshed: parsed.files.length,
       removed: 0,
     },
-    files: parsed.files.map((entry) => ({
-      path: entry.path,
-      bytes: entry.bytes,
-      signature: entry.signature ?? `${entry.bytes}:legacy`,
-      symbols: Array.isArray(entry.symbols) ? entry.symbols.slice(0, 80) : [],
-      indexedAt: entry.indexedAt,
-    })),
+    files: parsed.files
+      .map((entry) => ({
+        path: entry.path,
+        bytes: entry.bytes,
+        signature: entry.signature ?? `${entry.bytes}:legacy`,
+        symbols: Array.isArray(entry.symbols) ? entry.symbols.slice(0, 80) : [],
+        indexedAt: entry.indexedAt,
+      }))
+      .filter(
+        (entry) =>
+          typeof entry.path === "string" &&
+          entry.path.length <= 500 &&
+          !entry.path.startsWith("/") &&
+          !entry.path
+            .split(/[\\/]+/)
+            .some((part) => part === ".." || part === "") &&
+          Number.isSafeInteger(entry.bytes) &&
+          entry.bytes >= 0 &&
+          entry.bytes <= 100_000_000 &&
+          Array.isArray(entry.symbols),
+      ),
   };
 }
 

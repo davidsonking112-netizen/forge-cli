@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "forge-agent"
-version = "0.8.0"
+version = "0.9.0"
 description = "Python agent worker for Forge CLI"
 readme = "README.md"
 requires-python = ">=3.11"

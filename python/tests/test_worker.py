@@ -10,7 +10,7 @@ from unittest import mock
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from forge_agent.orchestration import BoundedOrchestrator
 from forge_agent.providers import MockProvider, OpenAICompatibleProvider, ProviderReply, redact
-from forge_agent.worker import MockAgent, main, verification_check
+from forge_agent.worker import MockAgent, main, redact_error, verification_check
 
 
 class WorkerTests(unittest.TestCase):
@@ -150,6 +150,23 @@ class WorkerTests(unittest.TestCase):
         reply = MockProvider().complete(messages=[{"role": "user", "content": "hello"}], tools=[], on_text=fragments.append)
         self.assertEqual(reply.text, "Mock provider response for: hello")
         self.assertEqual(fragments, [reply.text])
+
+    def test_worker_rejects_oversized_and_non_object_input(self):
+        output = io.StringIO()
+        oversized = "x" * 1_000_001
+        lines = json.dumps(oversized) + "\n" + json.dumps({"sessionId": "s", "type": "unknown"}) + "\n"
+        with mock.patch("sys.stdin", io.StringIO(lines)), redirect_stdout(output):
+            self.assertEqual(main(), 0)
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(events[0]["error"]["code"], "WORKER_PROTOCOL_ERROR")
+        self.assertEqual(events[1]["error"]["code"], "UNKNOWN_EVENT")
+
+    def test_worker_error_redaction_is_bounded(self):
+        message = redact_error("Bearer secret-token api_key=sk-secret token=abc-secret")
+        self.assertNotIn("secret-token", message)
+        self.assertNotIn("sk-secret", message)
+        self.assertNotIn("abc-secret", message)
+        self.assertLessEqual(len(message), 2_000)
 
     def test_invalid_input_is_reported(self):
         output = io.StringIO()

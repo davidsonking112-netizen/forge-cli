@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -38,7 +39,7 @@ import {
   readRepositoryIndex,
 } from "./index.js";
 
-const VERSION = "0.8.0";
+const VERSION = "0.9.0";
 
 function usage(): string {
   return `Forge CLI v${VERSION}
@@ -67,7 +68,7 @@ Usage:
   forge context <prompt>                   Inspect selected context and checks
   forge profiles                           List bounded autonomy profiles
   forge index build|show|query|clear        Manage the opt-in local metadata index
-  forge extensions list [dir]              Validate local extension manifests
+  forge extensions list|inspect [id] [dir] Validate local extension manifests
 
 Options:
   --output text|json     Select rendering mode (default: text)
@@ -320,17 +321,35 @@ async function assessRecovery(
   );
   const nextStep =
     activeStep ?? record.journal.find((entry) => entry.status === "pending");
+  const completed = record.status === "completed";
   let assessment: RecoveryAssessment = {
     sourceSessionId: record.id,
-    decision: record.status === "completed" ? "re-plan" : "continue",
+    decision: completed || !nextStep ? "re-plan" : "continue",
+    reasonCode: completed
+      ? "completed-session"
+      : nextStep
+        ? "unchanged-active-step"
+        : "unchanged-no-active-step",
     ...(nextStep ? { stepId: nextStep.stepId } : {}),
-    reason:
-      record.status === "completed"
-        ? "The source session completed; start a fresh bounded plan instead of replaying it."
-        : nextStep
-          ? `Continue from the recorded step: ${nextStep.description}`
-          : "No active step was recorded; create a fresh bounded plan.",
+    reason: completed
+      ? "The source session completed; start a fresh bounded plan instead of replaying it."
+      : nextStep
+        ? `Continue from the recorded step: ${nextStep.description}`
+        : "No active step was recorded; create a fresh bounded plan.",
+    workspaceChanged: false,
+    nextAction: completed || !nextStep ? "re-plan" : "resume",
   };
+  const workspaceStat = await fs.stat(record.workspace).catch(() => null);
+  if (!workspaceStat?.isDirectory()) {
+    return {
+      ...assessment,
+      decision: "manual-intervention",
+      reasonCode: "workspace-missing",
+      reason: "The recorded workspace is missing or is no longer a directory.",
+      workspaceChanged: true,
+      nextAction: "inspect-workspace",
+    };
+  }
   if (record.workspaceFingerprint) {
     const currentContext = await buildRepositoryContext(
       record.workspace,
@@ -341,16 +360,21 @@ async function assessRecovery(
       return {
         ...assessment,
         decision: "manual-intervention",
+        reasonCode: "workspace-drift",
         reason:
           "Workspace state changed since this session; inspect the changes and re-plan before resuming.",
+        workspaceChanged: true,
+        nextAction: "inspect-workspace",
       };
     }
   } else {
     assessment = {
       ...assessment,
       decision: "re-plan",
+      reasonCode: "legacy-session",
       reason:
         "This legacy session has no workspace fingerprint; begin a fresh bounded plan.",
+      nextAction: "re-plan",
     };
   }
   return assessment;
@@ -429,13 +453,14 @@ async function verifyCommand(args: ParsedArgs): Promise<number> {
   try {
     const session = await new ForgeSupervisor().readSession(sessionId);
     let stale = false;
+    let currentFingerprint: string | undefined;
     if (session.workspaceFingerprint) {
       const context = await buildRepositoryContext(
         session.workspace,
         session.plan?.goal ?? "verification",
       );
-      stale =
-        fingerprintRepositoryContext(context) !== session.workspaceFingerprint;
+      currentFingerprint = fingerprintRepositoryContext(context);
+      stale = currentFingerprint !== session.workspaceFingerprint;
     }
     const evidence = session.verification.map((check) => ({
       ...check,
@@ -444,13 +469,20 @@ async function verifyCommand(args: ParsedArgs): Promise<number> {
           ? "stale"
           : (check.status ?? (check.ok ? "passed" : "failed")),
     }));
+    const evidenceDigest = createHash("sha256")
+      .update(JSON.stringify(evidence))
+      .digest("hex");
     console.log(
       JSON.stringify(
         {
           sessionId: session.id,
           workspace: session.workspace,
           stale,
+          recordedFingerprint: session.workspaceFingerprint,
+          currentFingerprint,
           replayed: false,
+          evidenceDigest,
+          nextAction: stale ? "review-workspace-before-rerun" : "none",
           evidence,
         },
         null,
@@ -766,22 +798,57 @@ async function contextCommand(args: ParsedArgs): Promise<number> {
 }
 
 async function extensionsCommand(args: ParsedArgs): Promise<number> {
-  if (args.positional[0] !== "list" && args.positional[0] !== undefined) {
-    console.error("Usage: forge extensions list [directory]");
+  const action = args.positional[0] ?? "list";
+  if (action !== "list" && action !== "inspect") {
+    console.error("Usage: forge extensions list|inspect [id] [directory]");
     return 2;
   }
   const directory = path.resolve(
-    args.positional[1] ??
-      path.join(
-        process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
-        "forge",
-        "extensions",
-      ),
+    action === "inspect"
+      ? (args.positional[2] ??
+          path.join(
+            process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
+            "forge",
+            "extensions",
+          ))
+      : (args.positional[1] ??
+          path.join(
+            process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
+            "forge",
+            "extensions",
+          )),
   );
   try {
-    console.log(
-      JSON.stringify(await loadExtensionManifests(directory), null, 2),
-    );
+    const manifests = await loadExtensionManifests(directory);
+    if (action === "inspect") {
+      const id = args.positional[1];
+      const manifest = manifests.find((item) => item.id === id);
+      if (!manifest) {
+        console.error(`Unknown extension manifest: ${id ?? "missing id"}`);
+        return 1;
+      }
+      console.log(
+        JSON.stringify(
+          {
+            id: manifest.id,
+            version: manifest.version,
+            capabilities: manifest.capabilities,
+            execution: "inert-metadata-only",
+            recipes: manifest.recipes ?? null,
+            bounds: {
+              maxContextGlobs: 16,
+              maxVerificationRecipes: 8,
+              maxArgumentsPerRecipe: 8,
+              executable: false,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      return 0;
+    }
+    console.log(JSON.stringify(manifests, null, 2));
     return 0;
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));

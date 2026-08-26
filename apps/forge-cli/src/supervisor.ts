@@ -26,6 +26,8 @@ import {
 import type { PolicyPack } from "./policy.js";
 import { getAutonomyProfile, type AutonomyProfileName } from "./profiles.js";
 
+const FORGE_VERSION = "0.9.0";
+
 export interface RunOptions {
   prompt: string;
   workspace: string;
@@ -170,6 +172,18 @@ export class ForgeSupervisor {
             ),
           );
           continue;
+        }
+        if (event.type === "session.complete") {
+          event = {
+            ...event,
+            checks: event.checks.map((check) => ({
+              ...check,
+              commandDigest: createHash("sha256")
+                .update(check.command)
+                .digest("hex"),
+              toolVersion: FORGE_VERSION,
+            })),
+          };
         }
         await emit(event);
         if (event.type === "tool.proposal") {

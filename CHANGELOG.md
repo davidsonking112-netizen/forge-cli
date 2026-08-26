@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.0 — 2026-08-26
+
+Forge v0.9 adds event-specific JSONL validation with bounded fields, known-tool and enum checks, NUL rejection, and safe protocol failure behavior. The Python worker now rejects oversized or non-object input lines and bounds/redacts worker and provider error messages without gaining filesystem or process authority.
+
+Verification records now receive deterministic command digests and the Forge tool version from the supervisor, while `forge verify` reports an evidence digest, recorded/current fingerprints, and explicit rerun guidance without executing commands. Unified-diff preview and transactional apply share the same deterministic change-set digest and preflight conflict model.
+
+The opt-in local index now persists atomically and drops invalid metadata during normalization. Policy explanations expose stable decision categories and next actions. `forge extensions inspect` provides a read-only view of bounded declarative recipes and explicitly reports that they are inert metadata only. Existing v0.8 recovery, approval, transaction, local-only integration, and global safety boundaries remain unchanged.
+
 ## 0.8.0 — 2026-08-26
 
 Forge v0.8 adds deterministic step-aware recovery assessment through `forge session recovery`, persisted recovery decisions, and safe resume metadata. Resume never replays prior writes or commands; unchanged interrupted work can continue from its recorded step, completed or legacy records re-plan, and workspace drift requires manual intervention.

@@ -224,7 +224,7 @@ test("no-record supervisor runs do not persist session data", async () => {
   }
 });
 
-test("v0.8 CLI exposes recovery, change-set, verification, policy, extension, MCP, and PR workflows", async () => {
+test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MCP, and PR workflows", async () => {
   const root = await fixture();
   try {
     const config = path.join(root, "integrations.json");
@@ -425,6 +425,8 @@ test("v0.8 CLI exposes recovery, change-set, verification, policy, extension, MC
     assert.equal(explanation.status, 0);
     assert.match(explanation.stdout, /\"allowed\": false/);
     assert.match(explanation.stdout, /profile/);
+    assert.match(explanation.stdout, /"category"/);
+    assert.match(explanation.stdout, /"nextAction"/);
     const context = spawnSync(
       process.execPath,
       [cli, "context", "find relevant tests", "--workspace", root],
@@ -461,6 +463,14 @@ test("v0.8 CLI exposes recovery, change-set, verification, policy, extension, MC
     assert.equal(extensions.status, 0);
     assert.match(extensions.stdout, /\"sample\"/);
     assert.match(extensions.stdout, /contextGlobs/);
+    const extensionInspection = spawnSync(
+      process.execPath,
+      [cli, "extensions", "inspect", "sample", extensionDir],
+      { cwd: process.cwd(), encoding: "utf8" },
+    );
+    assert.equal(extensionInspection.status, 0);
+    assert.match(extensionInspection.stdout, /inert-metadata-only/);
+    assert.match(extensionInspection.stdout, /"executable": false/);
     const planState = await mkdtemp(
       path.join(os.tmpdir(), "forge-v07-cli-state-"),
     );
@@ -521,6 +531,8 @@ test("v0.8 CLI exposes recovery, change-set, verification, policy, extension, MC
       );
       assert.equal(verification.status, 1);
       assert.match(verification.stdout, /"replayed": false/);
+      assert.match(verification.stdout, /evidenceDigest/);
+      assert.match(verification.stdout, /nextAction/);
     } finally {
       await rm(planState, { recursive: true, force: true });
     }

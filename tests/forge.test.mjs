@@ -23,7 +23,11 @@ import { McpStdioClient } from "../dist/apps/forge-cli/src/mcp.js";
 import { ForgeSupervisor } from "../dist/apps/forge-cli/src/supervisor.js";
 import { SessionStore } from "../dist/apps/forge-cli/src/sessions.js";
 import { boundedFlagInt } from "../dist/apps/forge-cli/src/main.js";
-import { createEnvelope } from "../dist/packages/protocol/src/index.js";
+import {
+  createEnvelope,
+  isForgeEvent,
+  parseForgeEvent,
+} from "../dist/packages/protocol/src/index.js";
 import {
   PolicyEngine,
   WorkspaceTools,
@@ -53,7 +57,36 @@ async function tempWorkspace() {
   return directory;
 }
 
-test("v0.8 sessions persist journals and classify safe recovery decisions", async () => {
+test("v0.9 protocol validation rejects malformed and unbounded event data", () => {
+  const valid = {
+    ...createEnvelope("agent.text", "session-1"),
+    type: "agent.text",
+    text: "bounded",
+  };
+  assert.equal(isForgeEvent(valid), true);
+  assert.deepEqual(parseForgeEvent(JSON.stringify(valid)), valid);
+  assert.throws(
+    () => parseForgeEvent(JSON.stringify({ ...valid, type: "unknown" })),
+    /invalid/i,
+  );
+  assert.throws(
+    () =>
+      parseForgeEvent(JSON.stringify({ ...valid, text: "x".repeat(100_001) })),
+    /invalid|bound/i,
+  );
+  assert.throws(
+    () =>
+      parseForgeEvent(
+        JSON.stringify({
+          ...valid,
+          text: "bad" + String.fromCharCode(0) + "value",
+        }),
+      ),
+    /invalid|bound/i,
+  );
+});
+
+test("v0.9 sessions persist journals and classify safe recovery decisions", async () => {
   const workspace = await tempWorkspace();
   const stateHome = await mkdtemp(path.join(os.tmpdir(), "forge-v07-state-"));
   const sessionDirectory = path.join(stateHome, "forge", "sessions");
@@ -88,7 +121,10 @@ test("v0.8 sessions persist journals and classify safe recovery decisions", asyn
       },
     );
     assert.equal(unchanged.status, 0);
-    assert.equal(JSON.parse(unchanged.stdout).decision, "continue");
+    const unchangedAssessment = JSON.parse(unchanged.stdout);
+    assert.equal(unchangedAssessment.decision, "continue");
+    assert.equal(unchangedAssessment.reasonCode, "unchanged-active-step");
+    assert.equal(unchangedAssessment.nextAction, "resume");
     record.workspaceFingerprint = undefined;
     await new SessionStore(sessionDirectory).save(record);
     const legacy = spawnSync(
@@ -101,7 +137,10 @@ test("v0.8 sessions persist journals and classify safe recovery decisions", asyn
       },
     );
     assert.equal(legacy.status, 0);
-    assert.equal(JSON.parse(legacy.stdout).decision, "re-plan");
+    const legacyAssessment = JSON.parse(legacy.stdout);
+    assert.equal(legacyAssessment.decision, "re-plan");
+    assert.equal(legacyAssessment.reasonCode, "legacy-session");
+    assert.equal(legacyAssessment.workspaceChanged, false);
     record.workspaceFingerprint = start?.workspaceFingerprint;
     await new SessionStore(sessionDirectory).save(record);
     await writeFile(path.join(workspace, "README.md"), "changed after plan\n");
@@ -118,6 +157,8 @@ test("v0.8 sessions persist journals and classify safe recovery decisions", asyn
     assert.match(resumed.stderr, /Workspace state changed/i);
     const assessed = await new SessionStore(sessionDirectory).read(record.id);
     assert.equal(assessed.recovery?.decision, "manual-intervention");
+    assert.equal(assessed.recovery?.reasonCode, "workspace-drift");
+    assert.equal(assessed.recovery?.nextAction, "inspect-workspace");
   } finally {
     await rm(workspace, { recursive: true, force: true });
     await rm(stateHome, { recursive: true, force: true });
@@ -583,11 +624,13 @@ test("selected change sets preview and apply only explicitly reviewed files", as
     assert.equal(preview.summary.files, 2);
     assert.equal(preview.summary.selectedFiles, 1);
     assert.equal(preview.files.filter((file) => file.selected).length, 1);
+    assert.match(preview.changeSetDigest, /^[a-f0-9]{64}$/);
     const result = await tools.execute({
       tool: "workspace.apply_unified_diff",
       arguments: { diff, paths: ["app.txt"] },
     });
     assert.equal(result.ok, true);
+    assert.equal(result.output.changeSetDigest, preview.changeSetDigest);
     assert.deepEqual(result.output.files, ["app.txt"]);
     assert.equal(
       await readFile(path.join(directory, "app.txt"), "utf8"),
@@ -608,6 +651,8 @@ test("policy explanations identify global and profile restrictions", () => {
   });
   const denied = policy.explain("reversible-write", "workspace.apply_patch");
   assert.equal(denied.allowed, false);
+  assert.equal(denied.category, "denied");
+  assert.equal(denied.nextAction, "review-policy");
   assert.match(denied.reasons.join(" "), /policy restriction/i);
   const approval = new PolicyEngine("safe").explain(
     "local-execution",
@@ -615,6 +660,8 @@ test("policy explanations identify global and profile restrictions", () => {
   );
   assert.equal(approval.allowed, true);
   assert.equal(approval.approvalRequired, true);
+  assert.equal(approval.category, "approval-required");
+  assert.equal(approval.nextAction, "request-approval");
   const global = new PolicyEngine("unsafe").explain("network");
   assert.equal(global.allowed, false);
   assert.match(global.reasons.join(" "), /global safety ceiling/i);

@@ -19,6 +19,14 @@ from .orchestration import BoundedOrchestrator
 from .providers import Provider, ToolCall, build_provider
 
 PROTOCOL_VERSION = 1
+MAX_INPUT_LINE_BYTES = 1_000_000
+MAX_SESSION_ID_LENGTH = 100
+
+
+def redact_error(message: str) -> str:
+    redacted = re.sub(r"(?i)(bearer\s+|api[_-]?key[=:]\s*|token[=:]\s*)[^\s,;]+", r"\1[redacted]", message)
+    return redacted[:2_000]
+
 
 TOOL_RISKS = {
     "workspace.list": "read-only",
@@ -136,7 +144,7 @@ class MockAgent:
         try:
             reply = self.provider.complete(messages=self.messages, tools=TOOL_SCHEMAS, on_text=streamed.append)
         except Exception as exc:
-            return [event("error", self.session_id, error={"code": "PROVIDER_ERROR", "message": str(exc), "retryable": True}), event("session.complete", self.session_id, status="failed", summary="The configured provider failed before the task could complete.", changedFiles=self.changed_files, checks=self.verification_checks)]
+            return [event("error", self.session_id, error={"code": "PROVIDER_ERROR", "message": redact_error(str(exc)), "retryable": True}), event("session.complete", self.session_id, status="failed", summary="The configured provider failed before the task could complete.", changedFiles=self.changed_files, checks=self.verification_checks)]
         responses: list[dict[str, Any]] = []
         if reply.text and not streamed:
             responses.append(event("agent.text", self.session_id, text=reply.text))
@@ -276,10 +284,15 @@ def main() -> int:
             continue
         payload: dict[str, Any] = {}
         try:
-            payload = json.loads(line)
+            if len(line.encode("utf-8")) > MAX_INPUT_LINE_BYTES:
+                raise ValueError("worker input line exceeds the 1000000-byte limit")
+            parsed = json.loads(line)
+            if not isinstance(parsed, dict):
+                raise ValueError("worker input must be a JSON object")
+            payload = parsed
             session_id = str(payload.get("sessionId", ""))
-            if not session_id:
-                raise ValueError("sessionId is required")
+            if not session_id or len(session_id) > MAX_SESSION_ID_LENGTH:
+                raise ValueError("sessionId is missing or exceeds the bounded length")
             agent = agents.setdefault(session_id, MockAgent(session_id))
             message_type = payload.get("type")
             if message_type == "session.start":
@@ -293,8 +306,8 @@ def main() -> int:
             else:
                 responses = [event("error", session_id, error={"code": "UNKNOWN_EVENT", "message": f"Unsupported worker event: {message_type}", "retryable": False})]
         except Exception as exc:
-            session_id = str(payload.get("sessionId", "unknown"))
-            responses = [event("error", session_id, error={"code": "WORKER_PROTOCOL_ERROR", "message": str(exc), "retryable": False})]
+            session_id = str(payload.get("sessionId", "unknown"))[:MAX_SESSION_ID_LENGTH]
+            responses = [event("error", session_id, error={"code": "WORKER_PROTOCOL_ERROR", "message": redact_error(str(exc)), "retryable": False})]
         for response in responses:
             sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
             sys.stdout.flush()

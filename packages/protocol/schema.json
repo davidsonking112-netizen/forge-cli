@@ -42,15 +42,37 @@
           },
           "recovery": {
             "type": "object",
-            "required": ["sourceSessionId", "decision", "reason"],
+            "required": [
+              "sourceSessionId",
+              "decision",
+              "reasonCode",
+              "reason",
+              "workspaceChanged",
+              "nextAction"
+            ],
             "properties": {
               "sourceSessionId": { "type": "string", "minLength": 1 },
               "decision": {
                 "enum": ["continue", "re-plan", "manual-intervention"]
               },
+              "reasonCode": {
+                "enum": [
+                  "unchanged-active-step",
+                  "unchanged-no-active-step",
+                  "completed-session",
+                  "legacy-session",
+                  "workspace-drift",
+                  "workspace-missing"
+                ]
+              },
               "stepId": { "type": "string", "minLength": 1 },
-              "reason": { "type": "string", "maxLength": 500 }
+              "reason": { "type": "string", "maxLength": 500 },
+              "workspaceChanged": { "type": "boolean" },
+              "nextAction": {
+                "enum": ["resume", "re-plan", "inspect-workspace"]
+              }
             },
+
             "additionalProperties": false
           }
         }
@@ -159,6 +181,11 @@
                   "type": "string",
                   "pattern": "^[a-f0-9]{64}$"
                 },
+                "commandDigest": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "toolVersion": { "type": "string", "maxLength": 32 },
                 "outputTruncated": { "type": "boolean" }
               },
               "additionalProperties": false

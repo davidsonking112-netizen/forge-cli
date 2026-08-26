@@ -37,6 +37,7 @@ export interface UnifiedDiffPreviewFile {
 
 export interface UnifiedDiffPreview {
   safeToApply: boolean;
+  changeSetDigest: string;
   summary: { files: number; selectedFiles: number; hunks: number };
   files: UnifiedDiffPreviewFile[];
   conflicts: string[];
@@ -263,8 +264,14 @@ export class WorkspaceTools {
           conflict,
         });
     }
+    const changeSetDigest = createHash("sha256")
+      .update(diff)
+      .update(JSON.stringify(selectedPaths ?? []))
+      .update(JSON.stringify(files))
+      .digest("hex");
     return {
       safeToApply: conflicts.length === 0,
+      changeSetDigest,
       summary: {
         files: patches.length,
         selectedFiles: files.filter((file) => file.selected).length,
@@ -569,15 +576,22 @@ export class WorkspaceTools {
   private async applyUnifiedDiff(args: Record<string, unknown>): Promise<{
     files: string[];
     checkpoint: string;
+    changeSetDigest: string;
     summary: unknown;
   }> {
     const diff = args.diff;
     if (typeof diff !== "string")
       throw new Error("Unified diff requires string diff content");
-    const patches = parseUnifiedDiff(diff);
     const selectedPaths = Array.isArray(args.paths)
       ? args.paths.map(String)
       : undefined;
+    const preview = await this.previewUnifiedDiff(diff, selectedPaths);
+    if (!preview.safeToApply)
+      throw new Error(
+        `Change set is stale or invalid: ${preview.conflicts.join("; ")}`,
+      );
+    const changeSetDigest = preview.changeSetDigest;
+    const patches = parseUnifiedDiff(diff);
     const selection = selectedPaths?.length ? new Set(selectedPaths) : null;
     const selectedPatches = selection
       ? patches.filter((patch) =>
@@ -664,6 +678,7 @@ export class WorkspaceTools {
     const applied = await this.applyChanges(changes);
     return {
       ...applied,
+      changeSetDigest,
       summary: {
         files: selectedPatches.length,
         hunks: selectedPatches.reduce(
@@ -858,6 +873,8 @@ export class PolicyEngine {
     tool?: ToolName;
     allowed: boolean;
     approvalRequired: boolean;
+    category: "allowed" | "approval-required" | "denied";
+    nextAction: "execute-read-only" | "request-approval" | "review-policy";
     reasons: string[];
   } {
     const reasons: string[] = [];
@@ -882,6 +899,16 @@ export class PolicyEngine {
       ...(tool ? { tool } : {}),
       allowed,
       approvalRequired,
+      category: !allowed
+        ? "denied"
+        : approvalRequired
+          ? "approval-required"
+          : "allowed",
+      nextAction: !allowed
+        ? "review-policy"
+        : approvalRequired
+          ? "request-approval"
+          : "execute-read-only",
       reasons,
     };
   }
