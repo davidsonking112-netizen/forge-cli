@@ -8,7 +8,9 @@ The TypeScript/Node.js supervisor owns the command-line interface, terminal even
 
 Forge is in **v1.0 release-candidate preparation**. The v1 work adds named provider presets, generic OpenAI-compatible configuration, adaptive token-parameter handling, bounded MCP/ACP connectivity, improved terminal status visibility, a formal Constitution, and a documented readiness review. The v0.99 baseline remains the published release until the final release gates and publication decision are completed; this wording does not claim that every provider, platform, or possible zero-day has been exhaustively tested.
 
-Read the [Forge Constitution](docs/FORGE_CONSTITUTION.md), [v1.0 readiness report](docs/V1.0_READINESS_REPORT.md), [model-audit notes](docs/V1.0_MODEL_AUDIT_NOTES.md), and [security patch register](docs/V1.0_SECURITY_AUDIT_NOTES.md) for the governing principles, remaining recommendations, model-attributed findings, implemented patches, and evidence limitations.
+Read the [Forge Constitution](docs/FORGE_CONSTITUTION.md), [v1.0 readiness report](docs/V1.0_READINESS_REPORT.md), [model-audit notes](docs/V1.0_MODEL_AUDIT_NOTES.md), [security patch register](docs/V1.0_SECURITY_AUDIT_NOTES.md), and [exit/error-code reference](docs/ERROR_CODES.md) for the governing principles, remaining recommendations, model-attributed findings, implemented patches, automation contract, and evidence limitations.
+
+For scripts and CI, run `forge errors` for the versioned machine-readable contract. Exit code `0` means success, `1` means an attempted operation failed, and `2` means usage or safety preconditions blocked execution. Do not parse human-readable messages as a stable API.
 
 ## Development requirements
 

@@ -638,6 +638,32 @@ test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MC
   }
 });
 
+test("forge errors exposes the stable automation contract", async () => {
+  const cli = path.resolve("dist/apps/forge-cli/src/main.js");
+  const result = spawnSync(process.execPath, [cli, "errors"], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0);
+  const reference = JSON.parse(result.stdout);
+  assert.equal(reference.schemaVersion, 1);
+  assert.deepEqual(
+    reference.exitCodes.map((entry) => entry.code),
+    [0, 1, 2],
+  );
+  assert.ok(
+    reference.structuredErrorCodes.some(
+      (entry) => entry.code === "COMMAND_FAILED" && entry.retryable === true,
+    ),
+  );
+  const misuse = spawnSync(process.execPath, [cli, "errors", "extra"], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+  });
+  assert.equal(misuse.status, 2);
+  assert.match(misuse.stderr, /Usage: forge errors/);
+});
+
 test("forge init performs read-only onboarding checks", async () => {
   const root = await fixture();
   try {

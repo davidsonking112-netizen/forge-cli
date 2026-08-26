@@ -30,6 +30,7 @@ import { loadExtensionManifests } from "./extensions.js";
 import { prepareGitHubAction, runGitHubCommand } from "./github.js";
 import { DaytonaClient } from "./daytona.js";
 import { redactValue } from "./redaction.js";
+import { errorReference } from "./error-codes.js";
 import {
   getAutonomyProfile,
   listAutonomyProfiles,
@@ -54,6 +55,7 @@ Usage:
   forge init [--workspace <path>]         Run safe first-run onboarding checks
   forge doctor [--repair]                Check runtime; print safe repair guidance
   forge providers                         List supported provider configuration paths
+  forge errors                            Print stable exit and error-code reference
   forge config show|path|set <key> <v>   Inspect or update local configuration
   forge prompt show|set|clear            Manage an optional user system prompt
   forge session list|recovery|resume|export|delete Manage local sessions
@@ -112,6 +114,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     "init",
     "doctor",
     "providers",
+    "errors",
     "config",
     "prompt",
     "session",
@@ -281,6 +284,15 @@ function renderEvent(event: ForgeEvent, json: boolean): void {
     default:
       break;
   }
+}
+
+async function errorsCommand(args: ParsedArgs): Promise<number> {
+  if (args.positional.length) {
+    console.error("Usage: forge errors");
+    return 2;
+  }
+  console.log(JSON.stringify(errorReference(), null, 2));
+  return 0;
 }
 
 async function providersCommand(): Promise<number> {
@@ -2233,6 +2245,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (args.command === "init") return initCommand(args);
   if (args.command === "doctor") return doctor(args);
   if (args.command === "providers") return providersCommand();
+  if (args.command === "errors") return errorsCommand(args);
   if (args.command === "config") return configCommand(args);
   if (args.command === "prompt") return promptCommand(args);
   if (args.command === "session") return sessionCommand(args);
