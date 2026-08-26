@@ -26,6 +26,13 @@ python3 -m venv .venv
 python -m pip install -e ./python
 ```
 
+Run the read-only first-run onboarding checks. This inspects Node.js, Python, the approved workspace, provider configuration, and optional MCP, GitHub, and Daytona integrations. It does not install packages, store credentials, launch MCP servers, contact providers, or perform remote actions.
+
+```bash
+node dist/apps/forge-cli/src/main.js init --workspace .
+node dist/apps/forge-cli/src/main.js init --workspace . --output json
+```
+
 Run diagnostics:
 
 ```bash

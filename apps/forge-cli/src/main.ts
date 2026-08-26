@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -51,6 +51,7 @@ Usage:
   forge [prompt]                         Start an interactive coding session
   forge plan <prompt>                    Explore and produce a read-only plan
   forge run --prompt <prompt>            Run a task with machine-readable output support
+  forge init [--workspace <path>]         Run safe first-run onboarding checks
   forge doctor [--repair]                Check runtime; print safe repair guidance
   forge providers                         List supported provider configuration paths
   forge config show|path|set <key> <v>   Inspect or update local configuration
@@ -108,6 +109,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   const knownCommands = new Set([
     "plan",
     "run",
+    "init",
     "doctor",
     "providers",
     "config",
@@ -319,6 +321,254 @@ async function providersCommand(): Promise<number> {
     ),
   );
   return 0;
+}
+
+type InitCheckStatus = "pass" | "warn" | "fail";
+
+interface InitCheck {
+  id: string;
+  label: string;
+  status: InitCheckStatus;
+  detail: string;
+  next?: string;
+}
+
+function configFilePath(name: string): string {
+  return path.join(
+    process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
+    "forge",
+    name,
+  );
+}
+
+function providerInitCheck(): InitCheck {
+  const provider = (process.env.FORGE_PROVIDER ?? "mock").toLowerCase();
+  if (provider === "mock" || provider === "test")
+    return {
+      id: "provider",
+      label: "Provider configuration",
+      status: "pass",
+      detail: `Using offline ${provider} provider; no credential is required.`,
+    };
+  const keyNames: Record<string, string[]> = {
+    openrouter: ["OPENROUTER_API_KEY"],
+    groq: ["GROQ_API_KEY"],
+    gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_STUDIO_API_KEY"],
+    google: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_STUDIO_API_KEY"],
+    "google-ai-studio": [
+      "GEMINI_API_KEY",
+      "GOOGLE_API_KEY",
+      "GOOGLE_AI_STUDIO_API_KEY",
+    ],
+    xai: ["XAI_API_KEY"],
+    openai: ["FORGE_API_KEY", "OPENAI_API_KEY"],
+    "openai-compatible": ["FORGE_API_KEY", "OPENAI_API_KEY"],
+    compatible: ["FORGE_API_KEY", "OPENAI_API_KEY"],
+  };
+  const names = keyNames[provider] ?? ["FORGE_API_KEY", "OPENAI_API_KEY"];
+  const configuredKey = names.find((name) => Boolean(process.env[name]));
+  const baseUrl = process.env.FORGE_BASE_URL;
+  const model = process.env.FORGE_MODEL;
+  if (!configuredKey)
+    return {
+      id: "provider",
+      label: "Provider configuration",
+      status: "warn",
+      detail: `${provider} is selected but no credential was found; no network request was made.`,
+      next: `Set ${names.join(" or ")} or use FORGE_PROVIDER=mock for offline mode.`,
+    };
+  if (provider === "openai-compatible" || provider === "compatible") {
+    if (!baseUrl || !model)
+      return {
+        id: "provider",
+        label: "Provider configuration",
+        status: "warn",
+        detail:
+          "Credential found, but the generic provider still needs FORGE_BASE_URL and FORGE_MODEL.",
+        next: "Set a bounded HTTPS-compatible endpoint and model name; Forge init does not contact it.",
+      };
+  }
+  return {
+    id: "provider",
+    label: "Provider configuration",
+    status: "pass",
+    detail: `The ${provider} credential is present in the environment; its value was not printed or persisted.`,
+  };
+}
+
+async function initCommand(args: ParsedArgs): Promise<number> {
+  const workspace = path.resolve(
+    flagString(args.flags, "workspace") || process.cwd(),
+  );
+  const checks: InitCheck[] = [];
+  const json = flagString(args.flags, "output") === "json";
+  const nodeMajor = Number(process.versions.node.split(".")[0]);
+  checks.push(
+    nodeMajor >= 22
+      ? {
+          id: "node",
+          label: "Node.js runtime",
+          status: "pass",
+          detail: `${process.version} detected; Forge requires Node.js 22 or newer.`,
+        }
+      : {
+          id: "node",
+          label: "Node.js runtime",
+          status: "fail",
+          detail: `${process.version} detected; Forge requires Node.js 22 or newer.`,
+          next: "Install or select Node.js 22+ before running Forge.",
+        },
+  );
+  const python =
+    process.env.FORGE_PYTHON ??
+    (process.platform === "win32" ? "python" : "python3");
+  try {
+    const version = execFileSync(python, ["--version"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    }).trim();
+    const match = version.match(/(\d+)\.(\d+)/);
+    const major = Number(match?.[1] ?? 0);
+    const minor = Number(match?.[2] ?? 0);
+    checks.push(
+      major > 3 || (major === 3 && minor >= 11)
+        ? {
+            id: "python",
+            label: "Python runtime",
+            status: "pass",
+            detail: `${version} detected.`,
+          }
+        : {
+            id: "python",
+            label: "Python runtime",
+            status: "fail",
+            detail: `${version} detected; Forge requires Python 3.11 or newer.`,
+            next: "Install or select Python 3.11+ and set FORGE_PYTHON if needed.",
+          },
+    );
+  } catch {
+    checks.push({
+      id: "python",
+      label: "Python runtime",
+      status: "fail",
+      detail:
+        "Python could not be executed; no package installation was attempted.",
+      next: "Install Python 3.11+ or set FORGE_PYTHON to the intended interpreter.",
+    });
+  }
+  try {
+    const stat = await fs.lstat(workspace);
+    if (!stat.isDirectory()) throw new Error("not a directory");
+    await fs.access(workspace, fsConstants.R_OK | fsConstants.W_OK);
+    checks.push({
+      id: "workspace",
+      label: "Approved workspace",
+      status: "pass",
+      detail: `${workspace} is a readable and writable directory.`,
+    });
+  } catch {
+    checks.push({
+      id: "workspace",
+      label: "Approved workspace",
+      status: "fail",
+      detail: `${workspace} is not a readable and writable directory.`,
+      next: "Choose an existing workspace with --workspace <path> and correct permissions.",
+    });
+  }
+  checks.push(providerInitCheck());
+  const mcpPath = configFilePath("integrations.json");
+  try {
+    const mcpStat = await fs.lstat(mcpPath);
+    if (!mcpStat.isFile()) throw new Error("not a file");
+    const validation = await validateExternalServerConfig(mcpPath);
+    checks.push(
+      validation.valid
+        ? {
+            id: "mcp",
+            label: "MCP configuration",
+            status: "pass",
+            detail: `Configuration is valid with ${validation.servers} server definition(s); no server was launched.`,
+          }
+        : {
+            id: "mcp",
+            label: "MCP configuration",
+            status: "fail",
+            detail: validation.errors.join("; "),
+            next: `Run forge mcp validate --config ${mcpPath} for the bounded validation report.`,
+          },
+    );
+  } catch {
+    checks.push({
+      id: "mcp",
+      label: "MCP configuration",
+      status: "warn",
+      detail: "No local MCP configuration is present; MCP remains disabled.",
+      next: "Create integrations.json only when you intentionally configure a local stdio server.",
+    });
+  }
+  try {
+    const ghVersion = execFileSync("gh", ["--version"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    }).split("\n")[0];
+    checks.push({
+      id: "github",
+      label: "GitHub CLI integration",
+      status: "pass",
+      detail: `${ghVersion}; no network authentication check was performed.`,
+    });
+  } catch {
+    checks.push({
+      id: "github",
+      label: "GitHub CLI integration",
+      status: "warn",
+      detail: "GitHub CLI is not available; GitHub workflows remain optional.",
+      next: "Install gh only if you intend to use Forge’s explicit GitHub workflows.",
+    });
+  }
+  const daytonaConfigured = Boolean(process.env.DAYTONA_API_KEY);
+  checks.push(
+    daytonaConfigured
+      ? {
+          id: "daytona",
+          label: "Daytona integration",
+          status: "warn",
+          detail:
+            "A Daytona credential is present in the environment; no remote request was made.",
+          next: "Use forge daytona status only when you intentionally want to contact the configured endpoint.",
+        }
+      : {
+          id: "daytona",
+          label: "Daytona integration",
+          status: "warn",
+          detail:
+            "Daytona is not configured; the optional integration is inactive.",
+          next: "Set DAYTONA_API_KEY only when you intentionally enable Daytona workflows.",
+        },
+  );
+  const failed = checks.filter((check) => check.status === "fail");
+  if (json) {
+    console.log(JSON.stringify({ workspace, readOnly: true, checks }, null, 2));
+  } else {
+    console.log("Forge CLI onboarding (read-only)");
+    console.log(
+      "No packages installed, credentials stored, servers launched, or remote actions performed.\n",
+    );
+    for (const check of checks) {
+      const marker =
+        check.status === "pass"
+          ? "PASS"
+          : check.status === "warn"
+            ? "WARN"
+            : "FAIL";
+      console.log(`[${marker}] ${check.label}: ${check.detail}`);
+      if (check.next) console.log(`       Next: ${check.next}`);
+    }
+    console.log(
+      `\nResult: ${failed.length ? `${failed.length} check(s) need attention.` : "Core checks are ready; review warnings before using optional integrations."}`,
+    );
+  }
+  return failed.length ? 1 : 0;
 }
 
 async function doctor(args?: ParsedArgs): Promise<number> {
@@ -1980,6 +2230,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     console.log(VERSION);
     return 0;
   }
+  if (args.command === "init") return initCommand(args);
   if (args.command === "doctor") return doctor(args);
   if (args.command === "providers") return providersCommand();
   if (args.command === "config") return configCommand(args);

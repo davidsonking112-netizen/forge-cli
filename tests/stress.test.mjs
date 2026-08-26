@@ -638,6 +638,48 @@ test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MC
   }
 });
 
+test("forge init performs read-only onboarding checks", async () => {
+  const root = await fixture();
+  try {
+    const cli = path.resolve("dist/apps/forge-cli/src/main.js");
+    const env = {
+      ...process.env,
+      FORGE_PROVIDER: "mock",
+      DAYTONA_API_KEY: "",
+      OPENAI_API_KEY: "",
+      FORGE_API_KEY: "",
+    };
+    const text = spawnSync(
+      process.execPath,
+      [cli, "init", "--workspace", root],
+      { cwd: process.cwd(), encoding: "utf8", env },
+    );
+    assert.equal(text.status, 0);
+    assert.match(text.stdout, /Forge CLI onboarding \(read-only\)/);
+    assert.match(text.stdout, /Node\.js runtime/);
+    assert.match(text.stdout, /Python runtime/);
+    assert.match(text.stdout, /Approved workspace/);
+    assert.match(text.stdout, /No packages installed/);
+    assert.doesNotMatch(text.stdout, /sk-|OPENAI_API_KEY=.*\S+/);
+    const machine = spawnSync(
+      process.execPath,
+      [cli, "init", `--workspace=${root}`, "--output=json"],
+      { cwd: process.cwd(), encoding: "utf8", env },
+    );
+    assert.equal(machine.status, 0);
+    const report = JSON.parse(machine.stdout);
+    assert.equal(report.readOnly, true);
+    assert.equal(report.workspace, root);
+    assert.ok(
+      report.checks.some(
+        (check) => check.id === "provider" && check.status === "pass",
+      ),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("external server config stays disabled and rejects unsafe IDs", async () => {
   const root = await fixture();
   try {
