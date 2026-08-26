@@ -12,7 +12,7 @@ Forge resolves paths against the approved workspace root and rejects absolute pa
 
 ## Editing and checkpoints
 
-Multi-file edits validate all paths and optional original content hashes before writing. Forge creates a restrictive checkpoint manifest and backups before the batch is applied. If any write fails, the supervisor attempts to restore the checkpoint. Users can restore a recorded checkpoint through the `forge undo` command after confirming the target workspace. v0.4 does not claim a general three-way merge engine: changes remain structured and validation is hash- and path-based.
+Multi-file edits validate all paths and optional original content hashes before writing. Unified-diff edits additionally validate hunk headers, context lines, line counts, file existence, and rename/delete targets. Forge creates a restrictive checkpoint manifest and backups before the batch is applied. If any write fails, the supervisor attempts to restore the checkpoint. Users can restore a recorded checkpoint through the `forge undo` command after confirming the target workspace. v0.5 does not claim a general three-way merge engine.
 
 ## Process execution
 
@@ -28,7 +28,9 @@ The optional multi-agent mode is a bounded sequential analysis workflow. It uses
 
 ## MCP and ACP integrations
 
-MCP servers are untrusted child processes and are disabled by default. A caller must pass `--enable` for a single command; tool calls also require an interactive `YES` confirmation. MCP communication is local stdio JSON-RPC with a minimal child environment, request timeouts, and response-size limits. v0.4 does not implement remote MCP transports or a persistent enablement marketplace. ACP support is limited to normalized event boundaries and is not presented as a complete editor plugin or transport.
+MCP servers are untrusted child processes and are disabled by default. A caller must pass `--enable` for a single command; tool calls also require an interactive `YES` confirmation. Persistent enable/disable changes are also approval-gated. MCP communication is local stdio JSON-RPC with a minimal child environment, request timeouts, and response-size limits. v0.5 does not implement remote MCP transports or a persistent enablement marketplace. ACP is a bounded local JSON-RPC adapter, not a complete editor plugin or transport.
+
+Policy packs can only add deny rules and are rejected if they contain allowance-style keys, unknown risks, unknown tools, invalid protocol versions, or oversized content. Extension loading validates local metadata only; it does not execute arbitrary extension code or replace built-in tools. Changed-file context discovery uses a bounded local Git command and filters traversal and absolute paths.
 
 ## Data handling
 

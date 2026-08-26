@@ -1,5 +1,9 @@
 import { promises as fs } from "node:fs";
+import { execFile } from "node:child_process";
 import path from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 export interface ContextFile {
   path: string;
@@ -16,6 +20,7 @@ export interface RepositoryContext {
   files: ContextFile[];
   relevantFiles: ContextFile[];
   verificationCommands: string[][];
+  changedFiles: string[];
 }
 
 const ignored = new Set([
@@ -59,9 +64,14 @@ function extractSymbols(content: string): string[] {
   return [...symbols].slice(0, 80);
 }
 
-function score(filePath: string, terms: string[]): number {
+function score(
+  filePath: string,
+  terms: string[],
+  changedFiles: Set<string>,
+): number {
   const lower = filePath.toLowerCase();
   let value = priorityNames.includes(path.basename(lower)) ? 10 : 0;
+  if (changedFiles.has(filePath)) value += 20;
   if (lower.includes("test") || lower.includes("spec")) value += 3;
   for (const term of terms)
     if (term.length > 2 && lower.includes(term)) value += 5;
@@ -115,6 +125,29 @@ async function collect(root: string): Promise<ContextFile[]> {
   return files;
 }
 
+async function detectChangedFiles(root: string): Promise<string[]> {
+  try {
+    const result = await execFileAsync(
+      "git",
+      ["diff", "--name-only", "--", "."],
+      {
+        cwd: root,
+        timeout: 5_000,
+        maxBuffer: 100_000,
+      },
+    );
+    return result.stdout
+      .split(/\r?\n/)
+      .map((value) => value.trim().replaceAll("\\", "/"))
+      .filter(
+        (value) => value && !value.startsWith("../") && !path.isAbsolute(value),
+      )
+      .slice(0, 200);
+  } catch {
+    return [];
+  }
+}
+
 async function readInstructions(root: string): Promise<string | null> {
   const file = path.join(root, "FORGE.md");
   const content = await fs.readFile(file, "utf8").catch(() => null);
@@ -160,12 +193,14 @@ export async function buildRepositoryContext(
     .toLowerCase()
     .split(/[^a-z0-9_/-]+/)
     .filter(Boolean);
+  const changedFiles = await detectChangedFiles(root);
+  const changedFileSet = new Set(changedFiles);
   const relevantFiles: ContextFile[] = [];
   for (const file of [...files]
     .sort(
       (a, b) =>
-        score(b.path, terms) - score(a.path, terms) ||
-        a.path.localeCompare(b.path),
+        score(b.path, terms, changedFileSet) -
+          score(a.path, terms, changedFileSet) || a.path.localeCompare(b.path),
     )
     .slice(0, 16)) {
     if (file.bytes > 200_000) continue;
@@ -211,5 +246,6 @@ export async function buildRepositoryContext(
     files,
     relevantFiles,
     verificationCommands: await detectVerificationCommands(root, files),
+    changedFiles,
   };
 }

@@ -16,6 +16,7 @@ export type ToolName =
   | "workspace.read"
   | "workspace.diff"
   | "workspace.apply_patch"
+  | "workspace.apply_unified_diff"
   | "process.run"
   | "git.status"
   | "git.branch"

@@ -20,6 +20,18 @@
       }
     },
     {
+      "if": { "properties": { "type": { "const": "agent.delegation" } } },
+      "then": {
+        "required": ["role", "status", "turns", "text"],
+        "properties": {
+          "role": { "enum": ["explorer", "implementer", "tester", "reviewer"] },
+          "status": { "enum": ["completed", "failed", "skipped"] },
+          "turns": { "type": "integer", "minimum": 0 },
+          "text": { "type": "string" }
+        }
+      }
+    },
+    {
       "if": { "properties": { "type": { "const": "agent.plan" } } },
       "then": {
         "required": ["goal", "steps", "assumptions", "verification"],

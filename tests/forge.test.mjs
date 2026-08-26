@@ -13,13 +13,20 @@ import test from "node:test";
 import { buildRepositoryContext } from "../dist/apps/forge-cli/src/context.js";
 import {
   AcpBridge,
+  AcpJsonlBridge,
   ExternalToolRegistry,
 } from "../dist/apps/forge-cli/src/integrations.js";
+import { loadExtensionManifests } from "../dist/apps/forge-cli/src/extensions.js";
 import { ForgeSupervisor } from "../dist/apps/forge-cli/src/supervisor.js";
 import {
   PolicyEngine,
   WorkspaceTools,
 } from "../dist/apps/forge-cli/src/tools.js";
+import {
+  parseUnifiedDiff,
+  summarizeUnifiedDiff,
+} from "../dist/apps/forge-cli/src/diff.js";
+import { loadPolicyPack } from "../dist/apps/forge-cli/src/policy.js";
 
 async function tempWorkspace() {
   const directory = await mkdtemp(path.join(os.tmpdir(), "forge-test-"));
@@ -30,6 +37,101 @@ async function tempWorkspace() {
   await writeFile(path.join(directory, "app.txt"), "hello forge\n");
   return directory;
 }
+
+test("extension manifests load as validated metadata only", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "forge-extensions-"));
+  try {
+    await writeFile(
+      path.join(directory, "good.json"),
+      JSON.stringify({
+        id: "sample",
+        version: "1.0.0",
+        protocol: 1,
+        capabilities: ["context"],
+      }),
+    );
+    const manifests = await loadExtensionManifests(directory);
+    assert.deepEqual(manifests[0], {
+      id: "sample",
+      version: "1.0.0",
+      protocol: 1,
+      capabilities: ["context"],
+    });
+    await writeFile(
+      path.join(directory, "bad.json"),
+      JSON.stringify({
+        id: "bad",
+        version: "nope",
+        protocol: 1,
+        capabilities: ["context"],
+      }),
+    );
+    await assert.rejects(
+      loadExtensionManifests(directory),
+      /semantic version/i,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("policy packs can only add validated restrictions", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "forge-policy-"));
+  try {
+    const valid = path.join(directory, "strict.json");
+    await writeFile(
+      valid,
+      JSON.stringify({
+        id: "strict",
+        version: "1.0.0",
+        protocol: 1,
+        denyRisks: ["local-execution"],
+        denyTools: ["workspace.apply_patch"],
+      }),
+    );
+    const pack = await loadPolicyPack(valid);
+    assert.deepEqual(pack.denyRisks, ["local-execution"]);
+    assert.equal(
+      new PolicyEngine("safe", pack).isAllowed("local-execution"),
+      false,
+    );
+    assert.equal(
+      new PolicyEngine("safe", pack).isAllowed(
+        "reversible-write",
+        "workspace.apply_patch",
+      ),
+      false,
+    );
+    await writeFile(
+      path.join(directory, "allow.json"),
+      JSON.stringify({
+        id: "allow",
+        version: "1.0.0",
+        protocol: 1,
+        allowNetwork: true,
+      }),
+    );
+    await assert.rejects(
+      loadPolicyPack(path.join(directory, "allow.json")),
+      /only add restrictions/i,
+    );
+    await writeFile(
+      path.join(directory, "bad.json"),
+      JSON.stringify({
+        id: "bad",
+        version: "1.0.0",
+        protocol: 1,
+        denyRisks: ["networking"],
+      }),
+    );
+    await assert.rejects(
+      loadPolicyPack(path.join(directory, "bad.json")),
+      /unknown risk/i,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("safe policy requires approval for writes and execution", () => {
   const policy = new PolicyEngine("safe");
@@ -134,6 +236,43 @@ test("Git workflow tools validate mutation inputs", async () => {
   }
 });
 
+test("ACP JSON-RPC adapter normalizes events and preserves approval boundaries", () => {
+  const bridge = new AcpJsonlBridge(100);
+  const prompt = JSON.parse(
+    bridge.handleLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "prompt",
+        params: { prompt: "  inspect  " },
+      }),
+    ),
+  );
+  assert.equal(prompt.result.event.prompt, "inspect");
+  assert.equal(prompt.result.approvalRequired, false);
+  const edit = JSON.parse(
+    bridge.handleLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "edit.proposal",
+        params: { files: ["src/app.ts"] },
+      }),
+    ),
+  );
+  assert.equal(edit.result.approvalRequired, true);
+  const invalid = JSON.parse(bridge.handleLine("not-json"));
+  assert.equal(invalid.error.code, -32700);
+  const unknown = JSON.parse(
+    bridge.handleLine(
+      JSON.stringify({ jsonrpc: "2.0", id: 3, method: "shell.exec" }),
+    ),
+  );
+  assert.equal(unknown.error.code, -32602);
+  const oversized = JSON.parse(bridge.handleLine("x".repeat(101)));
+  assert.equal(oversized.error.code, -32600);
+});
+
 test("external integrations require explicit enablement and normalize ACP events", () => {
   const registry = new ExternalToolRegistry();
   registry.register({
@@ -219,6 +358,133 @@ test("context engine respects ignore patterns and ranks relevant files", async (
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("unified diffs apply hunks, create/delete files, and preserve checkpoints", async () => {
+  const directory = await tempWorkspace();
+  const checkpointDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "forge-diff-checkpoint-"),
+  );
+  try {
+    const tools = new WorkspaceTools(directory, checkpointDirectory);
+    const diff = [
+      "diff --git a/app.txt b/app.txt",
+      "--- a/app.txt",
+      "+++ b/app.txt",
+      "@@ -1 +1 @@",
+      "-hello forge",
+      "+hello Forge v0.5",
+      "diff --git a/new.txt b/new.txt",
+      "--- /dev/null",
+      "+++ b/new.txt",
+      "@@ -0,0 +1 @@",
+      "+created",
+      "diff --git a/remove.txt b/remove.txt",
+      "--- a/remove.txt",
+      "+++ /dev/null",
+      "@@ -1 +0,0 @@",
+      "-remove me",
+      "",
+    ].join("\n");
+    await writeFile(path.join(directory, "remove.txt"), "remove me\n");
+    const summary = summarizeUnifiedDiff(diff);
+    assert.deepEqual(summary, {
+      files: 3,
+      hunks: 3,
+      additions: 2,
+      deletions: 2,
+      renames: 0,
+      created: 1,
+      deleted: 1,
+      paths: ["app.txt", "app.txt", "new.txt", "remove.txt"],
+    });
+    const result = await tools.execute({
+      tool: "workspace.apply_unified_diff",
+      arguments: { diff },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(
+      await readFile(path.join(directory, "app.txt"), "utf8"),
+      "hello Forge v0.5\n",
+    );
+    assert.equal(
+      await readFile(path.join(directory, "new.txt"), "utf8"),
+      "created\n",
+    );
+    await assert.rejects(readFile(path.join(directory, "remove.txt"), "utf8"));
+    await tools.restoreCheckpoint(result.output.checkpoint);
+    assert.equal(
+      await readFile(path.join(directory, "app.txt"), "utf8"),
+      "hello forge\n",
+    );
+    await assert.rejects(readFile(path.join(directory, "new.txt"), "utf8"));
+    assert.equal(
+      await readFile(path.join(directory, "remove.txt"), "utf8"),
+      "remove me\n",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(checkpointDirectory, { recursive: true, force: true });
+  }
+});
+
+test("unified diff renames files through the same checkpoint boundary", async () => {
+  const directory = await tempWorkspace();
+  const checkpointDirectory = await mkdtemp(
+    path.join(os.tmpdir(), "forge-rename-checkpoint-"),
+  );
+  try {
+    await writeFile(path.join(directory, "old.txt"), "before\n");
+    const diff = [
+      "diff --git a/old.txt b/new.txt",
+      "similarity index 80%",
+      "rename from old.txt",
+      "rename to new.txt",
+      "--- a/old.txt",
+      "+++ b/new.txt",
+      "@@ -1 +1 @@",
+      "-before",
+      "+after",
+      "",
+    ].join("\n");
+    const tools = new WorkspaceTools(directory, checkpointDirectory);
+    const result = await tools.execute({
+      tool: "workspace.apply_unified_diff",
+      arguments: { diff },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(
+      await readFile(path.join(directory, "new.txt"), "utf8"),
+      "after\n",
+    );
+    await assert.rejects(readFile(path.join(directory, "old.txt"), "utf8"));
+    await tools.restoreCheckpoint(result.output.checkpoint);
+    assert.equal(
+      await readFile(path.join(directory, "old.txt"), "utf8"),
+      "before\n",
+    );
+    await assert.rejects(readFile(path.join(directory, "new.txt"), "utf8"));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(checkpointDirectory, { recursive: true, force: true });
+  }
+});
+
+test("unified diff parser rejects stale context and unsafe paths", () => {
+  assert.throws(
+    () =>
+      parseUnifiedDiff(
+        "diff --git a/../secret b/../secret\n--- a/../secret\n+++ b/../secret\n@@ -1 +1 @@\n-x\n+y\n",
+      ),
+    /unsafe path/i,
+  );
+  assert.throws(
+    () =>
+      parseUnifiedDiff(
+        "diff --git a/app.txt b/app.txt\n--- a/app.txt\n+++ b/app.txt\n@@ -1,2 +1 @@\n-x\n+y\n",
+      ),
+    /line counts|hunk/i,
+  );
 });
 
 test("multi-file edits are transactional and checkpoints can be restored", async () => {

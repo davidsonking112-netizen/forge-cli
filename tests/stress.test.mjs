@@ -186,7 +186,7 @@ test("no-record supervisor runs do not persist session data", async () => {
   }
 });
 
-test("v0.4 CLI exposes safe MCP and PR-preparation workflows", async () => {
+test("v0.5 CLI exposes safe review, ACP, policy, extension, MCP, and PR workflows", async () => {
   const root = await fixture();
   try {
     const config = path.join(root, "integrations.json");
@@ -218,6 +218,79 @@ test("v0.4 CLI exposes safe MCP and PR-preparation workflows", async () => {
     );
     assert.equal(denied.status, 2);
     assert.match(denied.stderr, /disabled by default/i);
+    const diffFile = path.join(root, "change.patch");
+    await writeFile(
+      diffFile,
+      [
+        "diff --git a/README.md b/README.md",
+        "--- a/README.md",
+        "+++ b/README.md",
+        "@@ -1 +1 @@",
+        "-# Stress fixture",
+        "+# Stress fixture v0.5",
+        "",
+      ].join("\n"),
+    );
+    const reviewed = spawnSync(process.execPath, [cli, "review", diffFile], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    assert.equal(reviewed.status, 0);
+    assert.match(reviewed.stdout, /\"hunks\": 1/);
+    const acp = spawnSync(process.execPath, [cli, "acp", "serve"], {
+      cwd: process.cwd(),
+      input:
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "edit.proposal",
+          params: { files: ["README.md"] },
+        }) + "\n",
+      encoding: "utf8",
+    });
+    assert.equal(acp.status, 0);
+    assert.match(acp.stdout, /\"approvalRequired\":true/);
+    const policyFile = path.join(root, "policy.json");
+    await writeFile(
+      policyFile,
+      JSON.stringify({
+        id: "strict",
+        version: "1.0.0",
+        protocol: 1,
+        denyRisks: ["local-execution"],
+      }),
+    );
+    const policy = spawnSync(
+      process.execPath,
+      [cli, "policy", "validate", policyFile],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      },
+    );
+    assert.equal(policy.status, 0);
+    assert.match(policy.stdout, /\"id\": \"strict\"/);
+    const extensionDir = path.join(root, "extensions");
+    await mkdir(extensionDir);
+    await writeFile(
+      path.join(extensionDir, "sample.json"),
+      JSON.stringify({
+        id: "sample",
+        version: "1.0.0",
+        protocol: 1,
+        capabilities: ["context"],
+      }),
+    );
+    const extensions = spawnSync(
+      process.execPath,
+      [cli, "extensions", "list", extensionDir],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      },
+    );
+    assert.equal(extensions.status, 0);
+    assert.match(extensions.stdout, /\"sample\"/);
     const draft = spawnSync(
       process.execPath,
       [cli, "git", "prepare-pr", "stress review", "--workspace", root],
@@ -243,11 +316,20 @@ test("external server config stays disabled and rejects unsafe IDs", async () =>
       JSON.stringify({
         servers: [
           { id: "helper", command: "helper", args: ["--stdio"], enabled: true },
+          {
+            id: "consented",
+            command: "helper",
+            args: ["--stdio"],
+            enabled: true,
+            explicitConsent: true,
+          },
         ],
       }),
     );
     const registry = await loadExternalServers(config);
     assert.equal(registry.list()[0].enabled, false);
+    assert.equal(registry.list()[1].enabled, true);
+    assert.equal(registry.list()[1].explicitConsent, true);
     assert.throws(
       () =>
         new ExternalToolRegistry().register({

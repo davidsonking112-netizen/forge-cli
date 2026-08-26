@@ -14,6 +14,7 @@ import {
 import { PolicyEngine, TOOL_METADATA, WorkspaceTools } from "./tools.js";
 import { SessionStore, type SessionRecord } from "./sessions.js";
 import { buildRepositoryContext } from "./context.js";
+import type { PolicyPack } from "./policy.js";
 
 export interface RunOptions {
   prompt: string;
@@ -25,6 +26,7 @@ export interface RunOptions {
   maxAgents?: number;
   maxTotalTurns?: number;
   record?: boolean;
+  policyPack?: PolicyPack;
   onEvent?: (event: ForgeEvent) => void;
   approve?: (
     proposal: ToolProposalEvent,
@@ -58,7 +60,10 @@ export class ForgeSupervisor {
             events: [],
           }
         : await this.sessions.create(workspace);
-    const policy = new PolicyEngine(options.policy ?? "safe");
+    const policy = new PolicyEngine(
+      options.policy ?? "safe",
+      options.policyPack,
+    );
     const tools = new WorkspaceTools(workspace);
     const worker = this.startWorker(options);
     const repositoryContext = await buildRepositoryContext(
@@ -132,7 +137,7 @@ export class ForgeSupervisor {
             continue;
           }
           const result =
-            approved && policy.isAllowed(event.risk)
+            approved && policy.isAllowed(event.risk, event.tool)
               ? await tools.execute({
                   tool: event.tool,
                   arguments: event.arguments,

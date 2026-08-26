@@ -6,29 +6,105 @@ export interface ExternalServer {
   command: string;
   args: string[];
   enabled: boolean;
+  explicitConsent?: boolean;
   trust: "untrusted";
   defaultRisk: RiskClass;
 }
 
 export interface AcpEvent {
-  type: "workspace.open" | "prompt" | "edit.proposal" | "verification";
+  type:
+    "workspace.open" | "prompt" | "edit.proposal" | "verification" | "cancel";
   workspace?: string;
   prompt?: string;
   files?: string[];
   status?: string;
+  reason?: string;
+}
+
+export interface AcpJsonRpcRequest {
+  jsonrpc?: string;
+  id?: string | number | null;
+  method?: string;
+  params?: unknown;
+}
+
+export class AcpJsonlBridge {
+  private readonly normalizer = new AcpBridge();
+
+  public constructor(private readonly maxLineBytes = 250_000) {}
+
+  public handleLine(line: string): string {
+    if (Buffer.byteLength(line, "utf8") > this.maxLineBytes)
+      return this.error(null, -32600, "ACP message exceeds the size limit");
+    let request: AcpJsonRpcRequest;
+    try {
+      request = JSON.parse(line) as AcpJsonRpcRequest;
+    } catch {
+      return this.error(null, -32700, "ACP message is not valid JSON");
+    }
+    if (request.jsonrpc !== "2.0" || typeof request.method !== "string")
+      return this.error(
+        request.id ?? null,
+        -32600,
+        "ACP request requires jsonrpc 2.0 and a method",
+      );
+    try {
+      const params =
+        request.params && typeof request.params === "object"
+          ? (request.params as Record<string, unknown>)
+          : {};
+      const event = this.normalizer.normalize({
+        type: request.method as AcpEvent["type"],
+        ...(typeof params.workspace === "string"
+          ? { workspace: params.workspace }
+          : {}),
+        ...(typeof params.prompt === "string" ? { prompt: params.prompt } : {}),
+        ...(Array.isArray(params.files)
+          ? { files: params.files.map(String).slice(0, 100) }
+          : {}),
+        ...(typeof params.status === "string" ? { status: params.status } : {}),
+        ...(typeof params.reason === "string" ? { reason: params.reason } : {}),
+      });
+      const approvalRequired =
+        event.type === "edit.proposal" || event.type === "verification";
+      return JSON.stringify({
+        jsonrpc: "2.0",
+        id: request.id ?? null,
+        result: { event, approvalRequired },
+      });
+    } catch (error) {
+      return this.error(
+        request.id ?? null,
+        -32602,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  private error(
+    id: string | number | null,
+    code: number,
+    message: string,
+  ): string {
+    return JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } });
+  }
 }
 
 export class ExternalToolRegistry {
   private readonly servers = new Map<string, ExternalServer>();
 
-  public register(server: ExternalServer): void {
+  public register(
+    server: ExternalServer,
+    allowConfiguredEnablement = false,
+  ): void {
     if (!/^[a-z][a-z0-9_-]{1,63}$/.test(server.id))
       throw new Error("External server IDs must be lowercase and bounded");
     if (!server.command || server.command.includes("\0"))
       throw new Error("External server command is invalid");
     this.servers.set(server.id, {
       ...server,
-      enabled: false,
+      enabled: allowConfiguredEnablement && server.enabled,
+      explicitConsent: allowConfiguredEnablement && server.enabled,
       trust: "untrusted",
     });
   }
@@ -71,21 +147,36 @@ export async function loadExternalServers(
     const item = value as Record<string, unknown>;
     if (typeof item.id !== "string" || typeof item.command !== "string")
       continue;
-    registry.register({
-      id: item.id,
-      command: item.command,
-      args: Array.isArray(item.args) ? item.args.map(String) : [],
-      enabled: false,
-      trust: "untrusted",
-      defaultRisk: "network",
-    });
+    const explicitConsent = item.explicitConsent === true;
+    registry.register(
+      {
+        id: item.id,
+        command: item.command,
+        args: Array.isArray(item.args) ? item.args.map(String) : [],
+        enabled: item.enabled === true,
+        explicitConsent,
+        trust: "untrusted",
+        defaultRisk: "network",
+      },
+      explicitConsent,
+    );
   }
   return registry;
 }
 
 export class AcpBridge {
   public normalize(event: AcpEvent): AcpEvent {
-    if (!event.type) throw new Error("ACP event type is required");
+    if (
+      !event.type ||
+      ![
+        "workspace.open",
+        "prompt",
+        "edit.proposal",
+        "verification",
+        "cancel",
+      ].includes(event.type)
+    )
+      throw new Error("Unsupported ACP event type");
     if (event.type === "prompt" && !event.prompt?.trim())
       throw new Error("ACP prompt cannot be empty");
     return {

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0 — 2026-08-26
+
+Forge v0.5 adds a bounded unified-diff editing and review engine. It validates diff headers, hunk counts, context lines, file existence, path containment, and stale content before applying changes. Modifications, additions, deletions, and renames use the existing checkpoint transaction and rollback boundary. `forge review` is read-only, while `forge apply-diff` requires an interactive approval.
+
+The release adds a practical local ACP JSON-RPC line adapter with bounded payloads, normalized workspace/prompt/edit/verification/cancellation events, structured protocol errors, and explicit approval metadata. It is an adapter boundary, not a complete editor plugin or remote transport.
+
+MCP trust management now supports approval-gated local enable/disable configuration changes, while server use remains explicitly opt-in and local stdio-only. The CLI also adds policy-pack validation and per-run loading, metadata-only extension-manifest validation, changed-file context prioritization, richer local Git contribution drafts, and inspection reports with tool timing, failures, approvals, delegation activity, provider, and verification metrics.
+
+The release synchronizes Node.js, TypeScript, and Python package metadata at 0.5.0 and expands deterministic cross-runtime coverage. The supervisor remains the sole filesystem and process authority. Policy packs can only add restrictions; extensions cannot replace built-in tools or execute arbitrary code through the manifest loader. Remote pushes, automatic pull requests, hidden background agents, unrestricted autonomy, cloud-default execution, web browsing, non-local telemetry, marketplace/accounts/billing, and credential-sensitive network operations remain outside the release.
+
 ## 0.4.0 — 2026-08-26
 
 Forge v0.4 adds a bounded multi-agent analysis workflow with fixed explorer, implementer, tester, and reviewer roles. Delegated specialists are sequential, budget-limited, non-recursive, tool-less, and represented by typed `agent.delegation` events; workspace and process authority remains with the TypeScript supervisor.

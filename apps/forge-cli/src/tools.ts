@@ -6,6 +6,7 @@ import type {
   RiskClass,
   ToolName,
 } from "../../../packages/protocol/src/index.js";
+import { applyUnifiedFilePatch, parseUnifiedDiff } from "./diff.js";
 
 export interface ToolResult {
   ok: boolean;
@@ -66,6 +67,10 @@ export const TOOL_METADATA: Record<ToolName, ToolMetadata> = {
   "workspace.apply_patch": {
     risk: "reversible-write",
     description: "Apply a reviewable file change",
+  },
+  "workspace.apply_unified_diff": {
+    risk: "reversible-write",
+    description: "Apply validated unified-diff hunks",
   },
   "process.run": {
     risk: "local-execution",
@@ -246,6 +251,12 @@ export class WorkspaceTools {
             output: await this.applyPatch(request.arguments),
             durationMs: Date.now() - started,
           };
+        case "workspace.apply_unified_diff":
+          return {
+            ok: true,
+            output: await this.applyUnifiedDiff(request.arguments),
+            durationMs: Date.now() - started,
+          };
         case "process.run": {
           const output = await this.runProcess(request.arguments);
           return {
@@ -420,8 +431,109 @@ export class WorkspaceTools {
         content,
         originalSha256:
           typeof item.originalSha256 === "string" ? item.originalSha256 : null,
+        delete: false,
       };
     });
+    return this.applyChanges(changes);
+  }
+
+  private async applyUnifiedDiff(args: Record<string, unknown>): Promise<{
+    files: string[];
+    checkpoint: string;
+    summary: unknown;
+  }> {
+    const diff = args.diff;
+    if (typeof diff !== "string")
+      throw new Error("Unified diff requires string diff content");
+    const patches = parseUnifiedDiff(diff);
+    const changes: Array<{
+      relativePath: string;
+      target: string;
+      content: string;
+      originalSha256: string | null;
+      delete: boolean;
+    }> = [];
+    for (const patch of patches) {
+      const oldTarget = patch.oldPath ? this.resolveSafe(patch.oldPath) : null;
+      const newTarget = patch.newPath ? this.resolveSafe(patch.newPath) : null;
+      if (!newTarget && !oldTarget)
+        throw new Error("Unified diff has no target path");
+      if (oldTarget && newTarget && oldTarget !== newTarget) {
+        const previous = await fs.readFile(oldTarget, "utf8").catch(() => {
+          throw new Error(`Rename source does not exist: ${patch.oldPath}`);
+        });
+        const content = patch.hunks.length
+          ? applyUnifiedFilePatch(previous, patch)
+          : previous;
+        changes.push({
+          relativePath: patch.oldPath as string,
+          target: oldTarget,
+          content: "",
+          originalSha256: createHash("sha256").update(previous).digest("hex"),
+          delete: true,
+        });
+        changes.push({
+          relativePath: patch.newPath as string,
+          target: newTarget,
+          content,
+          originalSha256: null,
+          delete: false,
+        });
+        continue;
+      }
+      const relativePath = patch.newPath ?? patch.oldPath;
+      if (!relativePath) throw new Error("Unified diff has no target path");
+      const target = newTarget ?? oldTarget;
+      if (!target) throw new Error("Unified diff target is invalid");
+      const previous = await fs.readFile(target, "utf8").catch(() => null);
+      if (!patch.oldPath && previous !== null)
+        throw new Error(`File already exists: ${relativePath}`);
+      if (!patch.newPath) {
+        if (previous === null)
+          throw new Error(`File does not exist: ${relativePath}`);
+        changes.push({
+          relativePath,
+          target,
+          content: "",
+          originalSha256: createHash("sha256").update(previous).digest("hex"),
+          delete: true,
+        });
+        continue;
+      }
+      const content =
+        previous === null
+          ? applyUnifiedFilePatch("", patch)
+          : applyUnifiedFilePatch(previous, patch);
+      changes.push({
+        relativePath,
+        target,
+        content,
+        originalSha256: previous
+          ? createHash("sha256").update(previous).digest("hex")
+          : null,
+        delete: false,
+      });
+    }
+    const applied = await this.applyChanges(changes);
+    return {
+      ...applied,
+      summary: {
+        files: patches.length,
+        hunks: patches.reduce((count, patch) => count + patch.hunks.length, 0),
+      },
+    };
+  }
+
+  private async applyChanges(
+    changes: Array<{
+      relativePath: string;
+      target: string;
+      content: string;
+      originalSha256: string | null;
+      delete: boolean;
+    }>,
+  ): Promise<{ files: string[]; checkpoint: string }> {
+    if (!changes.length) throw new Error("At least one file is required");
     const checkpoint = randomUUID();
     const manifest: Array<{
       path: string;
@@ -454,8 +566,11 @@ export class WorkspaceTools {
     );
     try {
       for (const change of changes) {
-        await fs.mkdir(path.dirname(change.target), { recursive: true });
-        await fs.writeFile(change.target, change.content, "utf8");
+        if (change.delete) await fs.unlink(change.target);
+        else {
+          await fs.mkdir(path.dirname(change.target), { recursive: true });
+          await fs.writeFile(change.target, change.content, "utf8");
+        }
       }
     } catch (error) {
       await this.restoreCheckpoint(checkpoint).catch(() => undefined);
@@ -550,9 +665,19 @@ export class WorkspaceTools {
 }
 
 export class PolicyEngine {
+  private readonly deniedRisks: ReadonlySet<RiskClass>;
+  private readonly deniedTools: ReadonlySet<ToolName>;
+
   public constructor(
     public readonly mode: "safe" | "session-approve" | "unsafe" = "safe",
-  ) {}
+    restrictions: {
+      denyRisks?: Iterable<RiskClass>;
+      denyTools?: Iterable<ToolName>;
+    } = {},
+  ) {
+    this.deniedRisks = new Set(restrictions.denyRisks ?? []);
+    this.deniedTools = new Set(restrictions.denyTools ?? []);
+  }
 
   public requiresApproval(risk: RiskClass): boolean {
     if (this.mode === "unsafe") return false;
@@ -560,12 +685,15 @@ export class PolicyEngine {
     return risk !== "read-only";
   }
 
-  public isAllowed(risk: RiskClass): boolean {
-    if (this.mode === "unsafe") return true;
-    return (
-      risk !== "destructive" &&
-      risk !== "network" &&
-      risk !== "credential-sensitive"
-    );
+  public isAllowed(risk: RiskClass, tool?: ToolName): boolean {
+    if (this.deniedRisks.has(risk) || (tool && this.deniedTools.has(tool)))
+      return false;
+    if (
+      risk === "destructive" ||
+      risk === "network" ||
+      risk === "credential-sensitive"
+    )
+      return false;
+    return true;
   }
 }

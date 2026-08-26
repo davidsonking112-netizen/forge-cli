@@ -6,7 +6,7 @@ The TypeScript/Node.js supervisor owns the command-line interface, terminal even
 
 ## Status
 
-Forge v0.4 is an active development release. It adds bounded multi-agent analysis, an MCP stdio client, ACP-ready event normalization, local PR-draft preparation, session inspection, privacy mode, verification-command discovery, and stronger provider controls while retaining the local-first safety model.
+Forge v0.5.0 is an active development release. It adds production-oriented unified-diff review and application, a local ACP JSON-RPC adapter, MCP trust-management commands, changed-file context prioritization, deny-only policy packs, extension-manifest validation, richer inspection reports, and structured local Git contribution drafts while retaining the local-first safety model.
 
 ## Development requirements
 
@@ -64,13 +64,22 @@ FORGE_API_KEY=your-key \
 node dist/apps/forge-cli/src/main.js run --multi-agent --max-agents 4 --max-total-turns 8 --prompt "review this repository"
 ```
 
-Use `forge inspect <session-id>` to view local event metrics, `--no-record` for privacy-sensitive runs, and `forge git prepare-pr` to generate a local review draft without pushing remotely. `forge doctor --repair` prints setup guidance only; it never installs packages or edits the workspace.
+Use `forge inspect <session-id>` to view bounded event, timing, approval, delegation, and verification metrics. Use `--no-record` for privacy-sensitive runs, and use `forge git prepare-pr` to generate a local review draft without pushing remotely. `forge doctor --repair` prints setup guidance only; it never installs packages or edits the workspace.
 
-MCP is opt-in per command. Configure servers in `~/.config/forge/integrations.json`, inspect them with `forge mcp list`, and use `forge mcp tools <id> --enable` for discovery. Calls use `forge mcp call <id> <tool> '{}' --enable` and require an interactive `YES` confirmation.
+Review and apply a unified diff safely:
+
+```bash
+forge review change.patch
+forge apply-diff change.patch --workspace /path/to/repository
+```
+
+MCP is opt-in per command. Configure servers in `~/.config/forge/integrations.json`, inspect them with `forge mcp list`, use `forge mcp enable <id>` or `forge mcp disable <id>` only after interactive approval, and use `forge mcp tools <id> --enable` for discovery. Calls use `forge mcp call <id> <tool> '{}' --enable` and require an interactive `YES` confirmation.
+
+Adapt local editor-style events through the ACP boundary with `printf '%s\\n' '{"jsonrpc":"2.0","id":1,"method":"prompt","params":{"prompt":"inspect"}}' | forge acp serve`. Validate a stricter policy pack with `forge policy validate policy.json`, load it for a run with `--policy-pack policy.json`, and inspect local extension manifests with `forge extensions list [directory]`.
 
 ## Safety model
 
-Forge starts in read-only exploration mode. File writes and command execution are gated, bounded, and visible. Repository instruction files are treated as untrusted guidance and cannot override the local policy. Forge does not persist provider credentials, does not expose common secret files by default, and does not include unrestricted auto-approval in v0.4. External servers remain disabled unless explicitly enabled, and remote pushes are never performed by Forge.
+Forge starts in read-only exploration mode. File writes and command execution are gated, bounded, and visible. Unified-diff changes are path- and context-validated, checkpointed, and approval-gated. Repository instruction files, policy packs, extension manifests, MCP metadata, and provider responses are untrusted data and cannot lower the global safety ceiling. Forge does not persist provider credentials, does not expose common secret files by default, and remote pushes are never performed by Forge.
 
 ## Repository layout
 

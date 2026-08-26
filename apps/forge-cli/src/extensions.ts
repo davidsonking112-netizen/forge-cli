@@ -2,6 +2,8 @@ import type {
   RiskClass,
   ToolName,
 } from "../../../packages/protocol/src/index.js";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import { TOOL_METADATA, type ToolMetadata } from "./tools.js";
 
 export interface ForgeExtensionManifest {
@@ -31,6 +33,23 @@ export class ExtensionRegistry {
     if (manifest.protocol !== 1)
       throw new Error(
         `Extension ${manifest.id} requires unsupported protocol ${manifest.protocol}`,
+      );
+    if (!/^\d+\.\d+\.\d+$/.test(manifest.version))
+      throw new Error(`Extension ${manifest.id} requires a semantic version`);
+    const allowedCapabilities = new Set([
+      "tool",
+      "provider",
+      "context",
+      "renderer",
+    ]);
+    if (
+      !manifest.capabilities.length ||
+      manifest.capabilities.some(
+        (capability) => !allowedCapabilities.has(capability),
+      )
+    )
+      throw new Error(
+        `Extension ${manifest.id} declares an invalid capability`,
       );
     if (this.manifests.has(manifest.id))
       throw new Error(`Extension ${manifest.id} is already registered`);
@@ -70,4 +89,32 @@ export class ExtensionRegistry {
       ]),
     );
   }
+}
+
+export async function loadExtensionManifests(
+  directory: string,
+): Promise<ForgeExtensionManifest[]> {
+  const registry = new ExtensionRegistry();
+  const entries = await fs
+    .readdir(directory, { withFileTypes: true })
+    .catch(() => []);
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const filePath = path.join(directory, entry.name);
+    const content = await fs.readFile(filePath, "utf8");
+    if (Buffer.byteLength(content, "utf8") > 100_000)
+      throw new Error(
+        `Extension manifest exceeds the 100000-byte limit: ${entry.name}`,
+      );
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    registry.register({
+      id: String(parsed.id ?? ""),
+      version: String(parsed.version ?? ""),
+      protocol: parsed.protocol as 1,
+      capabilities: Array.isArray(parsed.capabilities)
+        ? (parsed.capabilities as ForgeExtensionManifest["capabilities"])
+        : [],
+    });
+  }
+  return registry.list();
 }

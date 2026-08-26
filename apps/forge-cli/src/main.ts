@@ -10,11 +10,14 @@ import type {
 } from "../../../packages/protocol/src/index.js";
 import { ForgeSupervisor } from "./supervisor.js";
 import { FullScreenTui } from "./tui.js";
-import { loadExternalServers } from "./integrations.js";
+import { AcpJsonlBridge, loadExternalServers } from "./integrations.js";
 import { WorkspaceTools } from "./tools.js";
 import { McpStdioClient } from "./mcp.js";
+import { summarizeUnifiedDiff } from "./diff.js";
+import { loadPolicyPack } from "./policy.js";
+import { loadExtensionManifests } from "./extensions.js";
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 
 function usage(): string {
   return `Forge CLI v${VERSION}
@@ -29,7 +32,12 @@ Usage:
   forge undo <checkpoint-id>              Restore a Forge-managed checkpoint
   forge git status|branch|stage|commit    Use approval-gated local Git workflows
   forge git prepare-pr [title]            Prepare a local review-ready PR draft
-  forge mcp list|tools|call               Use explicitly enabled MCP stdio servers
+  forge mcp list|enable|disable|tools|call Use explicitly enabled MCP stdio servers
+  forge review <diff-file>                Inspect a unified diff without applying it
+  forge apply-diff <diff-file>            Apply a reviewed diff after approval
+  forge acp serve                          Adapt local ACP JSON-RPC lines safely
+  forge policy validate <file>             Validate a stricter local policy pack
+  forge extensions list [dir]              Validate local extension manifests
 
 Options:
   --output text|json     Select rendering mode (default: text)
@@ -40,6 +48,7 @@ Options:
   --max-agents <n>       Limit delegated specialist roles (default: 4)
   --max-total-turns <n>  Limit total delegated provider turns (default: 8)
   --no-record            Do not persist this session locally
+  --policy-pack <file>   Load a deny-only policy pack for this run
   --help                 Show this help
   --version              Show the version
 `;
@@ -63,6 +72,11 @@ function parseArgs(argv: string[]): ParsedArgs {
     "undo",
     "integrations",
     "mcp",
+    "review",
+    "apply-diff",
+    "acp",
+    "policy",
+    "extensions",
     "git",
     "help",
   ]);
@@ -292,8 +306,48 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
   try {
     const session = await new ForgeSupervisor().readSession(sessionId);
     const counts: Record<string, number> = {};
-    for (const event of session.events)
+    const toolMetrics: Record<
+      string,
+      { count: number; failures: number; totalMs: number }
+    > = {};
+    const approvalCounts: Record<string, number> = {};
+    const delegation: Array<{ role: string; status: string; turns: number }> =
+      [];
+    let checks: Array<{
+      command: string;
+      ok: boolean;
+      exitCode: number | null;
+    }> = [];
+    let provider: string | undefined;
+    for (const event of session.events) {
       counts[event.type] = (counts[event.type] ?? 0) + 1;
+      if (event.type === "session.start") provider = event.provider;
+      if (event.type === "tool.result") {
+        const metric = (toolMetrics[event.tool] ??= {
+          count: 0,
+          failures: 0,
+          totalMs: 0,
+        });
+        metric.count += 1;
+        metric.totalMs += event.durationMs;
+        if (!event.ok) metric.failures += 1;
+      }
+      if (event.type === "approval.result")
+        approvalCounts[event.decision] =
+          (approvalCounts[event.decision] ?? 0) + 1;
+      if (event.type === "agent.delegation")
+        delegation.push({
+          role: event.role,
+          status: event.status,
+          turns: event.turns,
+        });
+      if (event.type === "session.complete")
+        checks = event.checks.map((check) => ({
+          command: check.command,
+          ok: check.ok,
+          exitCode: check.exitCode,
+        }));
+    }
     console.log(
       JSON.stringify(
         {
@@ -301,8 +355,13 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
           workspace: session.workspace,
           createdAt: session.createdAt,
           updatedAt: session.updatedAt,
+          provider,
           eventCount: session.events.length,
           eventTypes: counts,
+          toolMetrics,
+          approvalCounts,
+          delegation,
+          checks,
         },
         null,
         2,
@@ -341,6 +400,12 @@ async function gitCommand(args: ParsedArgs): Promise<number> {
       typeof result.output === "object" && result.output !== null
         ? String((result.output as { output?: unknown }).output ?? "")
         : "";
+    let diffSummary: ReturnType<typeof summarizeUnifiedDiff> | null = null;
+    try {
+      if (diff.trim()) diffSummary = summarizeUnifiedDiff(diff);
+    } catch {
+      diffSummary = null;
+    }
     const body = [
       "## Summary",
       "",
@@ -357,7 +422,22 @@ async function gitCommand(args: ParsedArgs): Promise<number> {
       diff.slice(0, 80_000),
       "```",
     ].join("\\n");
-    console.log(JSON.stringify({ title, body, remoteAction: "none" }, null, 2));
+    console.log(
+      JSON.stringify(
+        {
+          title,
+          body,
+          summary: diffSummary,
+          remoteAction: "none",
+          verification: [
+            "Review the generated diff before committing.",
+            "Run the project checks before submission.",
+          ],
+        },
+        null,
+        2,
+      ),
+    );
     return 0;
   }
   let tool: "git.branch" | "git.stage" | "git.commit";
@@ -401,6 +481,114 @@ async function gitCommand(args: ParsedArgs): Promise<number> {
   }
 }
 
+async function extensionsCommand(args: ParsedArgs): Promise<number> {
+  if (args.positional[0] !== "list" && args.positional[0] !== undefined) {
+    console.error("Usage: forge extensions list [directory]");
+    return 2;
+  }
+  const directory = path.resolve(
+    args.positional[1] ??
+      path.join(
+        process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
+        "forge",
+        "extensions",
+      ),
+  );
+  try {
+    console.log(
+      JSON.stringify(await loadExtensionManifests(directory), null, 2),
+    );
+    return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
+async function policyCommand(args: ParsedArgs): Promise<number> {
+  if (args.positional[0] !== "validate" || !args.positional[1]) {
+    console.error("Usage: forge policy validate <file>");
+    return 2;
+  }
+  try {
+    console.log(
+      JSON.stringify(
+        await loadPolicyPack(path.resolve(args.positional[1])),
+        null,
+        2,
+      ),
+    );
+    return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
+async function acpCommand(args: ParsedArgs): Promise<number> {
+  if (args.positional[0] !== "serve") {
+    console.error("Usage: forge acp serve");
+    return 2;
+  }
+  const bridge = new AcpJsonlBridge();
+  const chunks: Buffer[] = [];
+  for await (const chunk of input) chunks.push(Buffer.from(chunk));
+  const inputText = Buffer.concat(chunks).toString("utf8");
+  for (const line of inputText.split(/\r?\n/)) {
+    if (line.trim()) process.stdout.write(`${bridge.handleLine(line)}\n`);
+  }
+  return 0;
+}
+
+async function diffCommand(args: ParsedArgs, apply: boolean): Promise<number> {
+  const diffPath = args.positional[0];
+  if (!diffPath) {
+    console.error(
+      `Usage: forge ${apply ? "apply-diff" : "review"} <diff-file> [--workspace <path>]`,
+    );
+    return 2;
+  }
+  try {
+    const diff = await fs.readFile(path.resolve(diffPath), "utf8");
+    const summary = summarizeUnifiedDiff(diff);
+    if (!apply) {
+      console.log(JSON.stringify({ mode: "review", summary }, null, 2));
+      return 0;
+    }
+    if (!input.isTTY) {
+      console.error(
+        "Applying a unified diff requires an interactive terminal approval.",
+      );
+      return 2;
+    }
+    const workspace = path.resolve(
+      flagString(args.flags, "workspace", process.cwd()),
+    );
+    const rl = createInterface({ input, output });
+    try {
+      console.log(JSON.stringify(summary, null, 2));
+      const answer = (
+        await rl.question("Apply this unified diff? Type YES to continue: ")
+      ).trim();
+      if (answer !== "YES") {
+        console.log("Unified diff denied.");
+        return 1;
+      }
+    } finally {
+      rl.close();
+    }
+    const result = await new WorkspaceTools(workspace).execute({
+      tool: "workspace.apply_unified_diff",
+      arguments: { diff },
+    });
+    console.log(JSON.stringify(result.output ?? result.error, null, 2));
+    return result.ok ? 0 : 1;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
 async function mcpCommand(args: ParsedArgs): Promise<number> {
   const configPath = flagString(
     args.flags,
@@ -411,8 +599,58 @@ async function mcpCommand(args: ParsedArgs): Promise<number> {
       "integrations.json",
     ),
   );
-  const registry = await loadExternalServers(configPath);
   const action = args.positional[0] ?? "list";
+  if (action === "enable" || action === "disable") {
+    const id = args.positional[1];
+    if (!id || !input.isTTY) {
+      console.error(
+        "Usage: forge mcp enable|disable <server-id> (interactive approval required)",
+      );
+      return 2;
+    }
+    const content = await fs.readFile(configPath, "utf8").catch(() => "{}");
+    const parsed = JSON.parse(content) as { servers?: unknown };
+    if (!Array.isArray(parsed.servers)) {
+      console.error("No MCP servers are configured.");
+      return 1;
+    }
+    const server = parsed.servers.find(
+      (value): value is Record<string, unknown> =>
+        Boolean(
+          value &&
+          typeof value === "object" &&
+          (value as Record<string, unknown>).id === id,
+        ),
+    );
+    if (!server) {
+      console.error(`Unknown MCP server: ${id}`);
+      return 1;
+    }
+    const rl = createInterface({ input, output });
+    try {
+      const answer = (
+        await rl.question(
+          `Persist MCP ${action} for ${id}? Type YES to continue: `,
+        )
+      ).trim();
+      if (answer !== "YES") {
+        console.log("MCP trust change denied.");
+        return 1;
+      }
+    } finally {
+      rl.close();
+    }
+    server.enabled = action === "enable";
+    server.explicitConsent = action === "enable";
+    await fs.mkdir(path.dirname(configPath), { recursive: true, mode: 0o700 });
+    await fs.writeFile(configPath, JSON.stringify(parsed, null, 2), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    console.log(`MCP server ${id} ${action}d in local configuration.`);
+    return 0;
+  }
+  const registry = await loadExternalServers(configPath);
   if (action === "list") {
     console.log(JSON.stringify(registry.list(), null, 2));
     return 0;
@@ -422,6 +660,10 @@ async function mcpCommand(args: ParsedArgs): Promise<number> {
     console.error(
       "Usage: forge mcp list|tools <server-id>|call <server-id> <tool> [json]",
     );
+    return 2;
+  }
+  if (action !== "tools" && action !== "call") {
+    console.error("Usage: forge mcp list|enable|disable|tools|call ...");
     return 2;
   }
   if (args.flags.enable !== true) {
@@ -584,6 +826,10 @@ async function runTask(args: ParsedArgs): Promise<number> {
       : undefined;
   const supervisor = new ForgeSupervisor();
   try {
+    const policyPackPath = flagString(args.flags, "policy-pack");
+    const policyPack = policyPackPath
+      ? await loadPolicyPack(path.resolve(policyPackPath))
+      : undefined;
     const runOptions = {
       prompt,
       workspace,
@@ -608,6 +854,7 @@ async function runTask(args: ParsedArgs): Promise<number> {
           }
         : {}),
       ...(args.flags["no-record"] === true ? { record: false } : {}),
+      ...(policyPack ? { policyPack } : {}),
     };
     const result = await supervisor.run(runOptions);
     return result.status === "completed" ? 0 : 1;
@@ -637,6 +884,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (args.command === "undo") return undoCommand(args);
   if (args.command === "integrations") return integrationsCommand(args);
   if (args.command === "mcp") return mcpCommand(args);
+  if (args.command === "review") return diffCommand(args, false);
+  if (args.command === "apply-diff") return diffCommand(args, true);
+  if (args.command === "acp") return acpCommand(args);
+  if (args.command === "policy") return policyCommand(args);
+  if (args.command === "extensions") return extensionsCommand(args);
   if (args.command === "git") return gitCommand(args);
   return runTask(args);
 }

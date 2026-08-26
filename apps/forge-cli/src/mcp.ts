@@ -49,6 +49,7 @@ export class McpStdioClient {
     }
   >();
   private nextId = 0;
+  private closed = false;
 
   public constructor(
     private readonly server: ExternalServer,
@@ -58,6 +59,7 @@ export class McpStdioClient {
   public async start(): Promise<void> {
     if (!this.server.enabled)
       throw new Error(`MCP server ${this.server.id} is not explicitly enabled`);
+    this.closed = false;
     this.process = spawn(this.server.command, this.server.args, {
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
@@ -73,7 +75,7 @@ export class McpStdioClient {
     await this.request("initialize", {
       protocolVersion: "2025-06-18",
       capabilities: {},
-      clientInfo: { name: "forge-cli", version: "0.4.0" },
+      clientInfo: { name: "forge-cli", version: "0.5.0" },
     });
     this.notify("notifications/initialized", {});
   }
@@ -116,6 +118,7 @@ export class McpStdioClient {
   }
 
   public close(): void {
+    this.closed = true;
     for (const pending of this.pending.values()) clearTimeout(pending.timer);
     this.pending.clear();
     this.process?.kill("SIGTERM");
@@ -132,7 +135,7 @@ export class McpStdioClient {
     method: string,
     params: Record<string, unknown>,
   ): Promise<JsonRpcResponse> {
-    if (!this.process)
+    if (!this.process || this.closed)
       return Promise.reject(new Error("MCP client is not started"));
     const id = `${++this.nextId}-${randomUUID()}`;
     this.process.stdin.write(
@@ -148,7 +151,7 @@ export class McpStdioClient {
   }
 
   private handleLine(line: string): void {
-    if (Buffer.byteLength(line, "utf8") > 1_000_000) return;
+    if (this.closed || Buffer.byteLength(line, "utf8") > 1_000_000) return;
     let response: JsonRpcResponse;
     try {
       response = JSON.parse(line) as JsonRpcResponse;
