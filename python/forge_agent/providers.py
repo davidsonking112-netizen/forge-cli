@@ -131,11 +131,17 @@ class OpenAICompatibleProvider:
         tools: list[dict[str, Any]],
         on_text: Callable[[str], None] | None = None,
     ) -> ProviderReply:
+        tool_name_map = self._tool_name_map(tools)
+        request_messages = self._encode_messages(messages, tool_name_map)
+        request_tools = self._encode_tools(tools, tool_name_map)
+        stream_enabled = bool(on_text)
+        if os.environ.get("FORGE_STREAM", "auto").strip().lower() in {"0", "false", "no", "off"}:
+            stream_enabled = False
         body: dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
+            "messages": request_messages,
             "temperature": 0,
-            "stream": bool(on_text),
+            "stream": stream_enabled,
         }
         if self.max_tokens is not None:
             parameter = self.token_parameter
@@ -144,8 +150,8 @@ class OpenAICompatibleProvider:
             body[parameter] = self.max_tokens
         if self.reasoning_effort:
             body["reasoning_effort"] = self.reasoning_effort
-        if tools:
-            body["tools"] = tools
+        if request_tools:
+            body["tools"] = request_tools
         request = urllib.request.Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(body).encode("utf-8"),
@@ -159,10 +165,10 @@ class OpenAICompatibleProvider:
         for attempt in range(self.max_retries + 1):
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    if on_text:
-                        return self._read_stream(response, on_text)
+                    if stream_enabled and on_text:
+                        return self._read_stream(response, on_text, tool_name_map)
                     payload = json.loads(response.read().decode("utf-8"))
-                return self._parse_payload(payload)
+                return self._parse_payload(payload, tool_name_map)
             except urllib.error.HTTPError as exc:
                 detail = redact(exc.read().decode("utf-8", errors="replace")[:1000])
                 if exc.code in {408, 409, 429, 500, 502, 503, 504} and attempt < self.max_retries:
@@ -176,7 +182,86 @@ class OpenAICompatibleProvider:
                 raise RuntimeError(f"Provider request failed: {redact(str(exc))}") from exc
         raise RuntimeError("Provider request exhausted its retry budget")
 
-    def _read_stream(self, response: Any, on_text: Callable[[str], None]) -> ProviderReply:
+    @staticmethod
+    def _tool_name_map(tools: list[dict[str, Any]]) -> dict[str, str]:
+        result: dict[str, str] = {}
+        used: set[str] = set()
+        for tool in tools:
+            function = tool.get("function")
+            if not isinstance(function, dict) or not isinstance(function.get("name"), str):
+                continue
+            original = function["name"]
+            encoded = original
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", encoded):
+                encoded = "forge_" + "".join(
+                    character if re.fullmatch(r"[A-Za-z0-9_-]", character) else f"_u{ord(character):x}_"
+                    for character in original
+                )
+            if encoded in used and result.get(original) != encoded:
+                encoded = f"{encoded}_{len(used)}"
+            result[original] = encoded
+            used.add(encoded)
+        return result
+
+    @staticmethod
+    def _encode_tools(tools: list[dict[str, Any]], tool_name_map: dict[str, str]) -> list[dict[str, Any]]:
+        encoded_tools: list[dict[str, Any]] = []
+        reverse = {original: encoded for original, encoded in tool_name_map.items()}
+        for tool in tools:
+            encoded = dict(tool)
+            function = tool.get("function")
+            if isinstance(function, dict):
+                encoded_function = dict(function)
+                name = encoded_function.get("name")
+                if isinstance(name, str):
+                    encoded_function["name"] = reverse.get(name, name)
+                encoded["function"] = encoded_function
+            encoded_tools.append(encoded)
+        return encoded_tools
+
+    @staticmethod
+    def _encode_messages(messages: list[dict[str, Any]], tool_name_map: dict[str, str]) -> list[dict[str, Any]]:
+        encoded_messages: list[dict[str, Any]] = []
+        for message in messages:
+            encoded = dict(message)
+            calls = message.get("tool_calls")
+            if isinstance(calls, list):
+                encoded_calls: list[dict[str, Any]] = []
+                for call in calls:
+                    encoded_call = dict(call)
+                    function = call.get("function")
+                    if isinstance(function, dict):
+                        encoded_function = dict(function)
+                        name = encoded_function.get("name")
+                        if isinstance(name, str):
+                            encoded_function["name"] = tool_name_map.get(name, name)
+                        encoded_call["function"] = encoded_function
+                    encoded_calls.append(encoded_call)
+                encoded["tool_calls"] = encoded_calls
+            encoded_messages.append(encoded)
+        return encoded_messages
+
+    @staticmethod
+    def _restore_message_tool_names(message: dict[str, Any], tool_name_map: dict[str, str]) -> dict[str, Any]:
+        restored = dict(message)
+        reverse = {encoded: original for original, encoded in tool_name_map.items()}
+        calls = message.get("tool_calls")
+        if isinstance(calls, list):
+            restored_calls: list[dict[str, Any]] = []
+            for call in calls:
+                restored_call = dict(call)
+                function = call.get("function")
+                if isinstance(function, dict):
+                    restored_function = dict(function)
+                    name = restored_function.get("name")
+                    if isinstance(name, str):
+                        restored_function["name"] = reverse.get(name, name)
+                    restored_call["function"] = restored_function
+                restored_calls.append(restored_call)
+            restored["tool_calls"] = restored_calls
+        return restored
+
+    def _read_stream(self, response: Any, on_text: Callable[[str], None], tool_name_map: dict[str, str] | None = None) -> ProviderReply:
         text_parts: list[str] = []
         tool_fragments: dict[str, dict[str, Any]] = {}
         usage: dict[str, Any] = {}
@@ -213,14 +298,14 @@ class OpenAICompatibleProvider:
                 for key in ("extra_content", "thought_signature", "thoughtSignature"):
                     if key in call:
                         state["metadata"][key] = call[key]
-        calls = self._parse_tool_fragments(tool_fragments)
+        calls = self._parse_tool_fragments(tool_fragments, tool_name_map or {})
         raw_calls: list[dict[str, Any]] = []
         for state in tool_fragments.values():
             raw_call: dict[str, Any] = {
                 "id": state["id"],
                 "type": "function",
                 "function": {
-                    "name": state["name"],
+                    "name": self._restore_tool_name(state["name"], tool_name_map or {}),
                     "arguments": state["arguments"] or "{}",
                 },
             }
@@ -236,7 +321,12 @@ class OpenAICompatibleProvider:
             raw_message=raw_message if raw_calls else {},
         )
 
-    def _parse_payload(self, payload: dict[str, Any]) -> ProviderReply:
+    @staticmethod
+    def _restore_tool_name(name: str, tool_name_map: dict[str, str]) -> str:
+        reverse = {encoded: original for original, encoded in tool_name_map.items()}
+        return reverse.get(name, name)
+
+    def _parse_payload(self, payload: dict[str, Any], tool_name_map: dict[str, str] | None = None) -> ProviderReply:
         choice = (payload.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         calls: list[ToolCall] = []
@@ -249,16 +339,17 @@ class OpenAICompatibleProvider:
                 raise RuntimeError(f"Provider returned invalid tool arguments: {exc}") from exc
             if not isinstance(arguments, dict):
                 raise RuntimeError("Provider tool arguments must be a JSON object")
-            calls.append(ToolCall(id=str(call.get("id", "")), name=str(function.get("name", "")), arguments=arguments))
+            name = str(function.get("name", ""))
+            calls.append(ToolCall(id=str(call.get("id", "")), name=self._restore_tool_name(name, tool_name_map or {}), arguments=arguments))
         return ProviderReply(
             text=str(message.get("content") or ""),
             tool_calls=tuple(calls),
             usage=payload.get("usage") or {},
-            raw_message=message,
+            raw_message=self._restore_message_tool_names(message, tool_name_map or {}),
         )
 
     @staticmethod
-    def _parse_tool_fragments(fragments: dict[str, dict[str, Any]]) -> tuple[ToolCall, ...]:
+    def _parse_tool_fragments(fragments: dict[str, dict[str, Any]], tool_name_map: dict[str, str] | None = None) -> tuple[ToolCall, ...]:
         calls: list[ToolCall] = []
         for state in fragments.values():
             try:
@@ -266,7 +357,7 @@ class OpenAICompatibleProvider:
             except json.JSONDecodeError as exc:
                 raise RuntimeError(f"Provider returned invalid streamed tool arguments: {exc}") from exc
             if isinstance(arguments, dict):
-                calls.append(ToolCall(id=state["id"], name=state["name"], arguments=arguments))
+                calls.append(ToolCall(id=state["id"], name=OpenAICompatibleProvider._restore_tool_name(state["name"], tool_name_map or {}), arguments=arguments))
         return tuple(calls)
 
 

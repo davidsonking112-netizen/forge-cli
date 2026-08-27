@@ -445,6 +445,7 @@ export class ForgeSupervisor {
           "FORGE_TOKEN_PARAMETER",
           "FORGE_REASONING_EFFORT",
           "FORGE_PROVIDER_RETRIES",
+          "FORGE_STREAM",
           "FORGE_HTTP_REFERER",
           "FORGE_APP_NAME",
           "HTTP_PROXY",

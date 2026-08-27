@@ -56,6 +56,8 @@ Do not commit these values to a repository. Prefer the shell’s secret store, a
 ## Bounded runtime controls
 
 `FORGE_MAX_TOKENS` is clamped to a safe upper bound, and `FORGE_PROVIDER_RETRIES` is clamped to five retries. `FORGE_TOKEN_PARAMETER=auto` selects `max_completion_tokens` for GPT-5 model names and `max_tokens` for other providers; set it explicitly to `max_tokens` or `max_completion_tokens` for a compatible gateway that requires a particular field. Provider requests have bounded context through Forge’s relevance selection and long-horizon compaction.
+
+Streaming is enabled when the CLI receives a text callback. Set `FORGE_STREAM=0` (or `false`, `no`, or `off`) for OpenAI-compatible gateways that do not implement streaming; Forge still parses the normal chat-completion response and preserves tool calls. Forge also encodes internal dotted tool names to the provider’s portable `[A-Za-z0-9_-]` function-name contract and restores the original names before supervisor validation.
 Provider tool calls remain proposals: the supervisor validates tool names, arguments, paths, risks, approval scope, and the immutable global deny ceiling before any local action.
 
 Streaming output is normalized into `agent.text` events. Function calls are normalized into Forge `tool.proposal` events; the Node supervisor validates their risk and arguments, applies policy, executes approved operations, and returns `tool.result` events. Empty or malformed provider output fails closed. Provider errors are bounded and redacted before they reach protocol events or audit projections.

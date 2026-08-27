@@ -288,6 +288,83 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn("secret-key", " ".join(non_auth_headers))
         self.assertNotIn("secret-key", request.data.decode("utf-8"))
 
+    def test_provider_can_disable_streaming_for_non_streaming_proxies(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return b'{"choices":[{"message":{"content":"ok"}}]}'
+
+        requests = []
+
+        def fake_urlopen(request, timeout):
+            del timeout
+            requests.append(request)
+            return Response()
+
+        provider = OpenAICompatibleProvider(
+            api_key="secret-key",
+            base_url="https://provider.invalid/v1",
+            model="gpt-5-mini",
+            max_retries=0,
+        )
+        with mock.patch.dict(os.environ, {"FORGE_STREAM": "0"}, clear=False):
+            with mock.patch("forge_agent.providers.urllib.request.urlopen", side_effect=fake_urlopen):
+                reply = provider.complete(
+                    messages=[{"role": "user", "content": "ping"}],
+                    tools=[],
+                    on_text=lambda _: None,
+                )
+        body = json.loads(requests[0].data)
+        self.assertFalse(body["stream"])
+        self.assertEqual(reply.text, "ok")
+
+    def test_provider_encodes_and_restores_dotted_tool_names(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return b'{"choices":[{"message":{"content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"forge_workspace_u2e_list","arguments":"{}"}}]}}]}'
+
+        requests = []
+
+        def fake_urlopen(request, timeout):
+            del timeout
+            requests.append(request)
+            return Response()
+
+        provider = OpenAICompatibleProvider(
+            api_key="secret-key",
+            base_url="https://provider.invalid/v1",
+            model="gpt-5-mini",
+            max_retries=0,
+        )
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "workspace.list",
+                "description": "List workspace files.",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        }]
+        with mock.patch.dict(os.environ, {"FORGE_STREAM": "0"}, clear=False):
+            with mock.patch("forge_agent.providers.urllib.request.urlopen", side_effect=fake_urlopen):
+                reply = provider.complete(
+                    messages=[{"role": "user", "content": "inspect"}],
+                    tools=tools,
+                )
+        body = json.loads(requests[0].data)
+        self.assertEqual(body["tools"][0]["function"]["name"], "forge_workspace_u2e_list")
+        self.assertEqual(reply.tool_calls[0].name, "workspace.list")
+
     def test_provider_keyboard_interrupt_propagates_without_retry(self):
         provider = OpenAICompatibleProvider(
             api_key="secret-key",
