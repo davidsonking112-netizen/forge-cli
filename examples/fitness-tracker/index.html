@@ -29,17 +29,24 @@
             />
             <button id="save-goal" class="btn">Save</button>
           </div>
-          <div class="progress" aria-hidden="false">
+          <div class="progress">
             <div
               class="progress-bar"
               id="goal-progress"
               role="progressbar"
+              aria-labelledby="goal-heading"
               aria-valuemin="0"
               aria-valuemax="100"
               aria-valuenow="0"
+              aria-valuetext="0 of 0 minutes this week"
             ></div>
           </div>
-          <p class="muted small" id="goal-summary"></p>
+          <p
+            class="muted small"
+            id="goal-summary"
+            role="status"
+            aria-live="polite"
+          ></p>
         </div>
 
         <div class="card stats-card" aria-labelledby="stats-heading">

@@ -11,7 +11,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from forge_agent.horizon import LongHorizonBuffer
 from forge_agent.orchestration import BoundedOrchestrator
 from forge_agent.providers import MockProvider, OpenAICompatibleProvider, ProviderReply, ToolCall, build_provider, redact
-from forge_agent.worker import MockAgent, main, redact_error, selected_roles, verification_check
+from forge_agent.worker import MockAgent, main, protocol_json, redact_error, selected_roles, verification_check
 
 
 class WorkerTests(unittest.TestCase):
@@ -425,6 +425,13 @@ class WorkerTests(unittest.TestCase):
         reply = MockProvider().complete(messages=[{"role": "user", "content": "hello"}], tools=[], on_text=fragments.append)
         self.assertEqual(reply.text, "Mock provider response for: hello")
         self.assertEqual(fragments, [reply.text])
+
+    def test_protocol_json_escapes_lone_surrogates(self):
+        payload = {"type": "agent.text", "text": "safe-" + chr(0xDC9D) + "-text"}
+        encoded = protocol_json(payload)
+        self.assertNotIn(chr(0xDC9D), encoded)
+        self.assertEqual(json.loads(encoded), payload)
+        encoded.encode("utf-8")
 
     def test_worker_rejects_oversized_and_non_object_input(self):
         output = io.StringIO()

@@ -400,6 +400,11 @@ def verification_check(
     }
 
 
+def protocol_json(value: Any) -> str:
+    """Serialize protocol events without emitting invalid Unicode surrogates."""
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+
 def main() -> int:
     agents: dict[str, MockAgent] = {}
     for raw_line in sys.stdin:
@@ -433,7 +438,7 @@ def main() -> int:
             session_id = str(payload.get("sessionId", "unknown"))[:MAX_SESSION_ID_LENGTH]
             responses = [event("error", session_id, error={"code": "WORKER_PROTOCOL_ERROR", "message": redact_error(str(exc)), "retryable": False})]
         for response in responses:
-            sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
+            sys.stdout.write(protocol_json(response) + "\n")
             sys.stdout.flush()
     return 0
 

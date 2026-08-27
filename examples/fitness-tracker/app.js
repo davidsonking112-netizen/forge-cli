@@ -227,6 +227,10 @@
     const bar = qs("goal-progress");
     bar.style.width = pct + "%";
     bar.setAttribute("aria-valuenow", String(pct));
+    bar.setAttribute(
+      "aria-valuetext",
+      goal ? `${achieved} of ${goal} minutes this week` : "No weekly goal set",
+    );
     qs("goal-summary").textContent = goal
       ? `${achieved} of ${goal} min (${pct}%) this week`
       : "No weekly goal set.";
