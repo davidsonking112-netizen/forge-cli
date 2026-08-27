@@ -104,6 +104,29 @@ test("full-screen TUI renders live session state across tabs", () => {
     }),
   );
   tui.handle(
+    event("agent.state", {
+      phase: "targeted-verify",
+      status: "active",
+      stepIndex: 1,
+      totalSteps: 2,
+      artifact: "targeted-verification",
+      artifactId: "targeted-verify-1",
+      entryConditions: ["A mutation result succeeded."],
+      requiredArtifact: "A targeted check with exit code 0",
+      exitCondition: "The targeted check passes",
+      failureTransition: "Enter repair",
+      note: "Awaiting targeted verification",
+      budget: {
+        providerTurns: 2,
+        maxProviderTurns: 64,
+        toolCalls: 3,
+        maxToolCalls: 128,
+        repairAttempts: 0,
+        maxRepairAttempts: 4,
+      },
+    }),
+  );
+  tui.handle(
     event("tool.proposal", {
       tool: "workspace.read",
       risk: "read-only",
@@ -140,6 +163,7 @@ test("full-screen TUI renders live session state across tabs", () => {
   assert.match(overview, /CHECKLIST 1\/2/);
   assert.match(overview, /Verification passed/);
   assert.match(overview, /workspace\.read/);
+  assert.match(overview, /Execution phase targeted-verify/);
 
   input.emit("2");
   assert.match(output.text(), /Improve the application safely/);
@@ -147,6 +171,8 @@ test("full-screen TUI renders live session state across tabs", () => {
   input.emit("4");
   assert.match(output.text(), /Verification/);
   assert.match(output.text(), /PASS/);
+  assert.match(output.text(), /Enforced execution state/);
+  assert.match(output.text(), /A targeted check with exit code 0/);
   tui.stop();
   assert.deepEqual(input.rawModes, [true, false]);
   assert.match(output.text(), /\x1b\[\?1049l/);

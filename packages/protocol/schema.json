@@ -134,6 +134,97 @@
       }
     },
     {
+      "if": { "properties": { "type": { "const": "agent.state" } } },
+      "then": {
+        "required": [
+          "phase",
+          "status",
+          "stepIndex",
+          "totalSteps",
+          "artifact",
+          "artifactId",
+          "entryConditions",
+          "requiredArtifact",
+          "exitCondition",
+          "failureTransition",
+          "note",
+          "budget"
+        ],
+        "properties": {
+          "phase": {
+            "enum": [
+              "intake",
+              "inspect",
+              "plan",
+              "milestone",
+              "implement",
+              "targeted-verify",
+              "evidence",
+              "repair",
+              "full-verify",
+              "summarize"
+            ]
+          },
+          "status": { "enum": ["active", "blocked", "completed", "failed"] },
+          "stepId": { "type": "string", "maxLength": 100 },
+          "stepIndex": { "type": "integer", "minimum": 0, "maximum": 64 },
+          "totalSteps": { "type": "integer", "minimum": 1, "maximum": 64 },
+          "artifact": { "type": "string", "maxLength": 100 },
+          "artifactId": { "type": "string", "maxLength": 100 },
+          "entryConditions": {
+            "type": "array",
+            "maxItems": 8,
+            "items": { "type": "string", "maxLength": 500 }
+          },
+          "requiredArtifact": { "type": "string", "maxLength": 1000 },
+          "exitCondition": { "type": "string", "maxLength": 1000 },
+          "failureTransition": { "type": "string", "maxLength": 1000 },
+          "note": { "type": "string", "maxLength": 1000 },
+          "budget": {
+            "type": "object",
+            "required": [
+              "providerTurns",
+              "maxProviderTurns",
+              "toolCalls",
+              "maxToolCalls",
+              "repairAttempts",
+              "maxRepairAttempts"
+            ],
+            "properties": {
+              "providerTurns": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              },
+              "maxProviderTurns": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 128
+              },
+              "toolCalls": { "type": "integer", "minimum": 0, "maximum": 256 },
+              "maxToolCalls": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 256
+              },
+              "repairAttempts": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4
+              },
+              "maxRepairAttempts": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
       "if": { "properties": { "type": { "const": "session.start" } } },
       "then": {
         "properties": {

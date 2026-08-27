@@ -273,6 +273,45 @@ test("v0.9 protocol validation rejects malformed and unbounded event data", () =
       ),
     /invalid|bound/i,
   );
+  const state = {
+    ...createEnvelope("agent.state", "session-1"),
+    type: "agent.state",
+    phase: "targeted-verify",
+    status: "active",
+    stepIndex: 1,
+    totalSteps: 4,
+    artifact: "targeted-verification",
+    artifactId: "targeted-verify-1",
+    entryConditions: ["A mutation result succeeded."],
+    requiredArtifact: "A targeted syntax or focused behavior check.",
+    exitCondition: "The check returns exit code 0.",
+    failureTransition: "Enter repair with bounded failure evidence.",
+    note: "Awaiting targeted verification.",
+    budget: {
+      providerTurns: 2,
+      maxProviderTurns: 64,
+      toolCalls: 5,
+      maxToolCalls: 128,
+      repairAttempts: 0,
+      maxRepairAttempts: 4,
+    },
+  };
+  assert.equal(isForgeEvent(state), true);
+  assert.deepEqual(parseForgeEvent(JSON.stringify(state)), state);
+  assert.throws(
+    () => parseForgeEvent(JSON.stringify({ ...state, phase: "unknown" })),
+    /invalid/i,
+  );
+  assert.throws(
+    () =>
+      parseForgeEvent(
+        JSON.stringify({
+          ...state,
+          budget: { ...state.budget, maxToolCalls: 999 },
+        }),
+      ),
+    /invalid|bound/i,
+  );
 });
 
 test("v0.9 sessions persist journals and classify safe recovery decisions", async () => {
@@ -295,6 +334,10 @@ test("v0.9 sessions persist journals and classify safe recovery decisions", asyn
     assert.ok(record.journal.some((entry) => entry.status === "complete"));
     assert.ok(record.journal.some((entry) => entry.status === "pending"));
     assert.ok(record.scratchpad.some((item) => item.key === "current-step"));
+    assert.equal(record.executionState?.phase, "summarize");
+    assert.equal(record.executionState?.status, "completed");
+    assert.equal(record.executionState?.artifact, "completion-summary");
+    assert.ok((record.executionState?.budget.maxToolCalls ?? 0) > 0);
     assert.ok(record.checklist.some((item) => item.id === "inspect"));
     assert.ok(record.checklist.some((item) => item.expectation.length > 0));
     const start = record.events.find((event) => event.type === "session.start");
@@ -1458,7 +1501,7 @@ test("session approvals are scoped to the exact tool arguments", async () => {
       },
     });
     assert.equal(result.status, "completed");
-    assert.equal(approvals, 2);
+    assert.equal(approvals, 3);
     const approvalEvents = events.filter(
       (event) => event.type === "approval.result" && event.category === "user",
     );
@@ -1471,6 +1514,8 @@ test("session approvals are scoped to the exact tool arguments", async () => {
     assert.ok(approvalEvents[0].scope?.paths?.includes("scoped.txt"));
     assert.equal(approvalEvents[1].decision, "approve-once");
     assert.equal(approvalEvents[1].scope, undefined);
+    assert.equal(approvalEvents[2].decision, "approve-once");
+    assert.equal(approvalEvents[2].scope, undefined);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1508,6 +1553,73 @@ test("supervisor completes a mock read-only plan flow", async () => {
     assert.equal(
       await readFile(path.join(directory, "README.md"), "utf8"),
       "# Fixture\nThis is a Forge fixture.\n",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("supervisor rejects premature mutation completion and continues to verified completion", async () => {
+  const directory = await tempWorkspace();
+  try {
+    const events = [];
+    const supervisor = new ForgeSupervisor();
+    const result = await supervisor.run({
+      prompt:
+        "Create file gate.txt and make a premature completion claim before verification",
+      workspace: directory,
+      approveAll: true,
+      onEvent: (event) => events.push(event),
+    });
+    assert.equal(result.status, "completed");
+    assert.deepEqual(result.changedFiles, ["gate.txt"]);
+    assert.ok(
+      events.some(
+        (event) => event.type === "agent.state" && event.status === "blocked",
+      ),
+    );
+    assert.ok(
+      events.some(
+        (event) =>
+          event.type === "agent.state" && event.phase === "targeted-verify",
+      ),
+    );
+    assert.ok(
+      events.some(
+        (event) =>
+          event.type === "agent.state" && event.phase === "full-verify",
+      ),
+    );
+    const completion = events.at(-1);
+    assert.equal(completion?.type, "session.complete");
+    assert.equal(completion?.status, "completed");
+    assert.equal(completion?.checks.length, 2);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("supervisor fails closed after bounded completion-gate rejection attempts", async () => {
+  const directory = await tempWorkspace();
+  try {
+    const events = [];
+    const result = await new ForgeSupervisor().run({
+      prompt:
+        "Create file loop.txt and make a premature completion claim in a gate loop",
+      workspace: directory,
+      approveAll: true,
+      onEvent: (event) => events.push(event),
+    });
+    assert.equal(result.status, "failed");
+    assert.match(result.summary, /evidence-gate failures/i);
+    const completions = events.filter(
+      (event) => event.type === "session.complete",
+    );
+    assert.equal(completions.at(-1)?.status, "failed");
+    assert.ok(
+      events.filter(
+        (event) => event.type === "agent.state" && event.status === "blocked",
+      ).length >= 3,
     );
   } finally {
     await rm(directory, { recursive: true, force: true });

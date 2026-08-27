@@ -629,3 +629,17 @@ class WorkerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_continue_provider_preserves_active_stage_after_gate_feedback(self):
+        agent = MockAgent("session-gate")
+        agent.provider = MockProvider()
+        agent.stage = "verify"
+        agent.prompt = "Create file gate.txt"
+        with mock.patch.dict(os.environ, {"FORGE_PROVIDER": "mock"}, clear=False):
+            responses = agent.continue_provider("The supervisor rejected the completion claim.")
+        self.assertEqual(agent.stage, "verify")
+        self.assertEqual(agent.messages[-1]["role"], "user")
+        self.assertIn("rejected", agent.messages[-1]["content"])
+        self.assertEqual(responses[1]["type"], "tool.proposal")
+        self.assertEqual(responses[1]["tool"], "process.run")

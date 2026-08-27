@@ -253,6 +253,18 @@ function renderEvent(event: ForgeEvent, json: boolean): void {
       );
       console.log(`Reason: ${event.reason}`);
       break;
+    case "agent.state":
+      console.log(
+        `\n[forge state] ${event.phase.toUpperCase()} — ${event.status} (${event.artifact})`,
+      );
+      console.log(`Artifact: ${event.artifactId}`);
+      console.log(`Required: ${event.requiredArtifact}`);
+      console.log(`Exit: ${event.exitCondition}`);
+      console.log(`Next: ${event.note}`);
+      console.log(
+        `Budget: turns ${event.budget.providerTurns}/${event.budget.maxProviderTurns}, tools ${event.budget.toolCalls}/${event.budget.maxToolCalls}, repairs ${event.budget.repairAttempts}/${event.budget.maxRepairAttempts}`,
+      );
+      break;
     case "agent.plan":
       console.log("\nPlan:");
       console.log(`Goal: ${event.goal}`);
@@ -1048,6 +1060,20 @@ async function auditCommand(args: ParsedArgs): Promise<number> {
             type: event.type,
             text: String(redactValue(event.text.slice(0, 1_000))),
           };
+        case "agent.state":
+          return {
+            timestamp: event.timestamp,
+            type: event.type,
+            phase: event.phase,
+            status: event.status,
+            artifact: event.artifact,
+            artifactId: event.artifactId,
+            stepId: event.stepId ?? null,
+            stepIndex: event.stepIndex,
+            totalSteps: event.totalSteps,
+            budget: event.budget,
+            note: event.note,
+          };
         case "agent.plan":
           return {
             timestamp: event.timestamp,
@@ -1333,6 +1359,7 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
           checklist: session.checklist,
           plan: session.plan,
           journal: session.journal,
+          executionState: session.executionState ?? null,
           verification: session.verification,
           eventCount: session.events.length,
           eventTypes: counts,

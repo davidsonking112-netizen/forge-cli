@@ -4,6 +4,7 @@ import type {
   AgentPlanEvent,
   AgentRepairEvent,
   AgentScratchpadEvent,
+  AgentStateEvent,
   ForgeEvent,
   SessionCompleteEvent,
   ToolProposalEvent,
@@ -95,6 +96,7 @@ export class FullScreenTui {
   private plan: AgentPlanEvent | undefined;
   private delegations: AgentDelegationEvent[] = [];
   private checks: SessionCompleteEvent["checks"] = [];
+  private executionState: AgentStateEvent | undefined;
   private sessionId = "";
   private workspace = "";
   private provider = "";
@@ -198,6 +200,14 @@ export class FullScreenTui {
     } else if (event.type === "agent.plan") {
       this.plan = event;
       this.addActivity(time, "PLAN", event.goal, "good");
+    } else if (event.type === "agent.state") {
+      this.executionState = event;
+      this.addActivity(
+        time,
+        "STATE",
+        `${event.phase} / ${event.artifact}: ${event.note}`,
+        statusTone(event.status),
+      );
     } else if (event.type === "agent.delegation") {
       this.delegations = [
         ...this.delegations.filter((entry) => entry.role !== event.role),
@@ -403,6 +413,9 @@ export class FullScreenTui {
     this.writeLine(
       `${ANSI.dim}${this.fit(`Provider ${this.provider || "detecting"}   Policy ${this.policy || "safe"}   Workspace ${this.workspace || "pending"}`, inner)}${ANSI.reset}`,
     );
+    this.writeLine(
+      `${ANSI.dim}${this.fit(`Execution phase ${this.executionState?.phase || "intake"}   Artifact ${this.executionState?.artifact || "task-contract"}   Budget ${this.executionState ? `${this.executionState.budget.providerTurns}/${this.executionState.budget.maxProviderTurns} turns, ${this.executionState.budget.toolCalls}/${this.executionState.budget.maxToolCalls} tools` : "initializing"}`, inner)}${ANSI.reset}`,
+    );
     const tabs = ["1 Overview", "2 Plan", "3 Activity", "4 Evidence"]
       .map((tab) =>
         tab.startsWith(
@@ -546,6 +559,27 @@ export class FullScreenTui {
   }
 
   private drawEvidence(inner: number, rows: number): void {
+    if (this.executionState) {
+      this.writeLine(
+        `${ANSI.bold}Enforced execution state${ANSI.reset}: ${this.executionState.phase} / ${this.executionState.status}`,
+      );
+      this.writeLine(
+        this.fit(
+          `Artifact ${this.executionState.artifactId}: ${this.executionState.artifact}`,
+          inner,
+        ),
+      );
+      this.writeLine(
+        this.fit(`Required: ${this.executionState.requiredArtifact}`, inner),
+      );
+      this.writeLine(
+        this.fit(`Exit: ${this.executionState.exitCondition}`, inner),
+      );
+      this.writeLine(
+        this.fit(`Failure: ${this.executionState.failureTransition}`, inner),
+      );
+      this.writeLine("");
+    }
     this.writeLine(`${ANSI.bold}Tools${ANSI.reset}`);
     for (const entry of this.tools.slice(
       -Math.max(2, Math.floor((rows - 15) / 2)),

@@ -133,6 +133,47 @@ export interface AgentPlanEvent extends BaseEvent {
   verification: string[];
 }
 
+export type ExecutionPhase =
+  | "intake"
+  | "inspect"
+  | "plan"
+  | "milestone"
+  | "implement"
+  | "targeted-verify"
+  | "evidence"
+  | "repair"
+  | "full-verify"
+  | "summarize";
+
+export type ExecutionStateStatus =
+  "active" | "blocked" | "completed" | "failed";
+
+export interface AgentStateBudget {
+  providerTurns: number;
+  maxProviderTurns: number;
+  toolCalls: number;
+  maxToolCalls: number;
+  repairAttempts: number;
+  maxRepairAttempts: number;
+}
+
+export interface AgentStateEvent extends BaseEvent {
+  type: "agent.state";
+  phase: ExecutionPhase;
+  status: ExecutionStateStatus;
+  stepId?: string;
+  stepIndex: number;
+  totalSteps: number;
+  artifact: string;
+  artifactId: string;
+  entryConditions: string[];
+  requiredArtifact: string;
+  exitCondition: string;
+  failureTransition: string;
+  note: string;
+  budget: AgentStateBudget;
+}
+
 export interface PlanStep {
   id: string;
   description: string;
@@ -223,6 +264,7 @@ export type ForgeEvent =
   | AgentDelegationEvent
   | AgentRepairEvent
   | AgentPlanEvent
+  | AgentStateEvent
   | ToolProposalEvent
   | ToolResultEvent
   | ApprovalResultEvent
@@ -291,6 +333,19 @@ function validCheck(value: unknown): value is CheckResult {
       protocolString(check.toolVersion, 32)) &&
     (check.outputTruncated === undefined ||
       typeof check.outputTruncated === "boolean")
+  );
+}
+
+function validExecutionBudget(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const budget = value as Record<string, unknown>;
+  return (
+    boundedInteger(budget.providerTurns, 0, 128) &&
+    boundedInteger(budget.maxProviderTurns, 1, 128) &&
+    boundedInteger(budget.toolCalls, 0, 256) &&
+    boundedInteger(budget.maxToolCalls, 1, 256) &&
+    boundedInteger(budget.repairAttempts, 0, 4) &&
+    boundedInteger(budget.maxRepairAttempts, 1, 4)
   );
 }
 
@@ -397,6 +452,37 @@ export function isForgeEvent(value: unknown): value is ForgeEvent {
             (entry.note === undefined || protocolString(entry.note, 500))
           );
         })
+      );
+    case "agent.state":
+      return (
+        [
+          "intake",
+          "inspect",
+          "plan",
+          "milestone",
+          "implement",
+          "targeted-verify",
+          "evidence",
+          "repair",
+          "full-verify",
+          "summarize",
+        ].includes(String(candidate.phase)) &&
+        ["active", "blocked", "completed", "failed"].includes(
+          String(candidate.status),
+        ) &&
+        (candidate.stepId === undefined ||
+          protocolString(candidate.stepId, 100)) &&
+        boundedInteger(candidate.stepIndex, 0, 64) &&
+        boundedInteger(candidate.totalSteps, 1, 64) &&
+        protocolString(candidate.artifact, 100) &&
+        protocolString(candidate.artifactId, 100) &&
+        protocolArray(candidate.entryConditions, 8) &&
+        candidate.entryConditions.every((item) => protocolString(item, 500)) &&
+        protocolString(candidate.requiredArtifact, 1_000) &&
+        protocolString(candidate.exitCondition, 1_000) &&
+        protocolString(candidate.failureTransition, 1_000) &&
+        protocolString(candidate.note, 1_000) &&
+        validExecutionBudget(candidate.budget)
       );
     case "agent.delegation":
       return (

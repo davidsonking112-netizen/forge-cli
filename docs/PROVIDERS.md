@@ -58,7 +58,7 @@ Do not commit these values to a repository. Prefer the shell’s secret store, a
 `FORGE_MAX_TOKENS` is clamped to a safe upper bound, and `FORGE_PROVIDER_RETRIES` is clamped to five retries. `FORGE_TOKEN_PARAMETER=auto` selects `max_completion_tokens` for GPT-5 model names and `max_tokens` for other providers; set it explicitly to `max_tokens` or `max_completion_tokens` for a compatible gateway that requires a particular field. Provider requests have bounded context through Forge’s relevance selection and long-horizon compaction.
 
 Streaming is enabled when the CLI receives a text callback. Set `FORGE_STREAM=0` (or `false`, `no`, or `off`) for OpenAI-compatible gateways that do not implement streaming; Forge still parses the normal chat-completion response and preserves tool calls. Forge also encodes internal dotted tool names to the provider’s portable `[A-Za-z0-9_-]` function-name contract and restores the original names before supervisor validation.
-Provider tool calls remain proposals: the supervisor validates tool names, arguments, paths, risks, approval scope, and the immutable global deny ceiling before any local action.
+Provider tool calls remain proposals: the supervisor validates tool names, arguments, paths, risks, approval scope, and the immutable global deny ceiling before any local action. The supervisor also owns an implementation state machine that emits `agent.state` contracts and evaluates evidence independently of provider text.
 
 Streaming output is normalized into `agent.text` events. Function calls are normalized into Forge `tool.proposal` events; the Node supervisor validates their risk and arguments, applies policy, executes approved operations, and returns `tool.result` events. Empty or malformed provider output fails closed. Provider errors are bounded and redacted before they reach protocol events or audit projections.
 
@@ -79,6 +79,8 @@ Forge computes a stable signature for each proposed tool name and argument objec
 
 When a task clearly requests a mutation but the provider returns text without a tool call, Forge makes at most two additional continuation requests. Each request explicitly asks for one bounded implementation action and warns against repeating completed reads. If the provider still does not propose a tool, the session ends as failed rather than claiming that the implementation happened. The existing maximum horizon-turn bound remains authoritative.
 
+A separate supervisor completion gate handles provider `session.complete` claims. Mutation claims must have an observed execution plan, a successful approved mutation with changed-file evidence, a passing targeted check, and a distinct passing broad project check. A text-only “done” response or a completion event with missing checks is rejected before it is persisted as completed. Forge sends bounded gate feedback to the active provider session and allows up to three gate rejections; after that ceiling it emits a failed completion with the evidence accumulated so far. The deterministic offline mock follows the same gate and is used only for repeatable harness tests, not as evidence of live-model intelligence.
+
 Long-horizon compaction also treats an assistant message containing multiple tool calls and all matching tool results as one atomic history group. Compaction may summarize or remove the complete group, but it does not leave an assistant tool call without its results or a stray tool result without its matching assistant call. These controls improve reliability without changing the supervisor’s authority: the worker still proposes, and only the TypeScript supervisor validates, approves, and executes local operations.
 
 The following optional controls tune the bounded behavior. Values are clamped by the worker and should be increased only when the task genuinely requires more model turns.
@@ -89,5 +91,7 @@ The following optional controls tune the bounded behavior. Values are clamped by
 | `FORGE_MAX_TEXT_ONLY_RECOVERIES` |      `2` | Maximum continuation requests after text-only output during a mutation task. |
 | `FORGE_MAX_HORIZON_CHARS`        | `60,000` | Maximum retained conversation context before compaction.                     |
 | `FORGE_MAX_HORIZON_MESSAGES`     |     `96` | Maximum retained conversation messages before compaction.                    |
+
+The supervisor’s three-attempt completion-gate ceiling is intentionally not provider-configurable in this release; changing it requires a code-reviewed policy change because it controls false-success prevention.
 
 These mechanisms are reliability boundaries, not a guarantee of autonomous success. A provider can still misunderstand a task, produce an invalid patch, hit a quota limit, or stop after a legitimate explanation. Forge reports those conditions and does not convert them into a false success.

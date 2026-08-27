@@ -9,6 +9,8 @@ import {
   encodeForgeEvent,
   parseForgeEvent,
   type ForgeEvent,
+  type SessionCompleteEvent,
+  type ApprovalResultEvent,
   type PolicyMode,
   type RiskClass,
   type ApprovalScope,
@@ -26,6 +28,10 @@ import {
 import type { PolicyPack } from "./policy.js";
 import { getAutonomyProfile, type AutonomyProfileName } from "./profiles.js";
 import { acquireWorkspaceLock } from "./locks.js";
+import {
+  ImplementationStateMachine,
+  type ExecutionStateSnapshot,
+} from "./execution-state.js";
 
 const FORGE_VERSION = "0.9.9";
 
@@ -101,6 +107,17 @@ export class ForgeSupervisor {
     }
   }
 
+  private executionStateEvent(
+    sessionId: string,
+    snapshot: ExecutionStateSnapshot,
+  ): ForgeEvent {
+    return {
+      ...createEnvelope("agent.state", sessionId),
+      type: "agent.state",
+      ...snapshot,
+    };
+  }
+
   private async runUnlocked(
     options: RunOptions,
     workspace: string,
@@ -152,6 +169,11 @@ export class ForgeSupervisor {
       fingerprintRepositoryContext(repositoryContext);
     session.workspaceFingerprint = workspaceFingerprint;
     if (options.record !== false) await this.sessions.save(session);
+    const stateMachine = new ImplementationStateMachine(options.prompt, {
+      maxProviderTurns: 64,
+      maxToolCalls: 128,
+      maxRepairAttempts: 4,
+    });
     const worker = this.startWorker(options);
     const abortWorker = (): void => {
       if (!worker.killed) worker.kill("SIGTERM");
@@ -166,6 +188,7 @@ export class ForgeSupervisor {
       workerError = error instanceof Error ? error : new Error(String(error));
     });
     let sessionResult: RunResult | undefined;
+    let completionRejections = 0;
     let approvalMode: "safe" | "session-approve" | "unsafe" = policy.mode;
     let approvalScope: ApprovalScope | undefined;
 
@@ -196,6 +219,13 @@ export class ForgeSupervisor {
           );
           continue;
         }
+        if (
+          event.type === "agent.plan" ||
+          event.type === "tool.proposal" ||
+          event.type === "session.complete"
+        ) {
+          stateMachine.recordProviderTurn();
+        }
         if (event.type === "session.complete") {
           event = {
             ...event,
@@ -207,6 +237,79 @@ export class ForgeSupervisor {
               toolVersion: FORGE_VERSION,
             })),
           };
+        }
+        if (event.type === "tool.proposal") {
+          const proposalGate = stateMachine.proposalGate(event.tool);
+          if (!proposalGate.ok) {
+            await emit(event);
+            const blocked = stateMachine.block(proposalGate.reason);
+            await emit(this.executionStateEvent(session.id, blocked));
+            const denied: ApprovalResultEvent = {
+              ...createEnvelope("approval.result", session.id),
+              type: "approval.result",
+              proposalId: event.id,
+              decision: "deny",
+              category: "policy",
+            };
+            await emit(denied);
+            const stateDenied: ToolResultEvent = {
+              ...createEnvelope("tool.result", session.id),
+              type: "tool.result",
+              tool: event.tool,
+              ok: false,
+              error: {
+                code: "STATE_TRANSITION_BLOCKED",
+                message: proposalGate.reason,
+                retryable: false,
+              },
+              approved: false,
+              durationMs: 0,
+            };
+            await emit(stateDenied);
+            send(stateDenied);
+            continue;
+          }
+        }
+        const stateSnapshot = stateMachine.observe(event);
+        if (stateSnapshot)
+          await emit(this.executionStateEvent(session.id, stateSnapshot));
+        if (event.type === "session.complete") {
+          const gate = stateMachine.completionGate(event);
+          if (event.status === "completed" && gate.ok) {
+            await emit(
+              this.executionStateEvent(
+                session.id,
+                stateMachine.acceptCompletion(),
+              ),
+            );
+          }
+          if (event.status === "completed" && !gate.ok) {
+            completionRejections += 1;
+            const blocked = stateMachine.block(gate.reason);
+            await emit(this.executionStateEvent(session.id, blocked));
+            if (completionRejections <= 3) {
+              send({
+                ...createEnvelope("user.prompt", session.id),
+                type: "user.prompt",
+                prompt: `Forge rejected the completion claim: ${gate.reason} Continue from the last verified checkpoint. Perform the missing bounded milestone or verification step; do not claim done until the supervisor evidence satisfies the completion gates.`,
+              });
+              continue;
+            }
+            const failed: SessionCompleteEvent = {
+              ...event,
+              status: "failed",
+              summary: `Forge refused completion after ${completionRejections} evidence-gate failures: ${gate.reason}`,
+            };
+            await emit(failed);
+            sessionResult = {
+              sessionId: session.id,
+              status: failed.status,
+              summary: failed.summary,
+              changedFiles: failed.changedFiles,
+            };
+            worker.stdin.end();
+            continue;
+          }
         }
         await emit(event);
         if (event.type === "tool.proposal") {
@@ -325,6 +428,9 @@ export class ForgeSupervisor {
             durationMs: result.durationMs,
           };
           await emit(resultEvent);
+          const resultSnapshot = stateMachine.observe(resultEvent);
+          if (resultSnapshot)
+            await emit(this.executionStateEvent(session.id, resultSnapshot));
           send(resultEvent);
         }
         if (event.type === "session.complete") {
@@ -353,6 +459,8 @@ export class ForgeSupervisor {
       ...(options.recovery ? { recovery: options.recovery } : {}),
     };
     await emit(startEvent);
+    for (const snapshot of stateMachine.initialSnapshots())
+      await emit(this.executionStateEvent(session.id, snapshot));
     send(startEvent);
     await processing;
     if (!sessionResult) {

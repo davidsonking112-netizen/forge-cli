@@ -148,6 +148,7 @@ class MockAgent:
     mutation_applied: bool = False
     turn_count: int = 0
     repair_attempts: int = 0
+    verification_round: int = 0
 
     def start(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         self.workspace = str(payload.get("workspace", "."))
@@ -213,6 +214,17 @@ class MockAgent:
                 return self._progress_events("inspect", "Session started. Forge will inspect before planning or changing files.") + self.provider_turn()
             return self.handle_prompt(self.prompt)
         return [event("agent.text", self.session_id, text="Forge is ready. Describe the coding task you want to work on.")]
+
+    def continue_provider(self, instruction: str) -> list[dict[str, Any]]:
+        """Continue an active provider session after supervisor gate feedback."""
+        self._append_message({"role": "user", "content": instruction[:4_000]})
+        if self.provider is None or os.environ.get("FORGE_PROVIDER", "mock").lower() in {"mock", "test"}:
+            if "gate loop" in self.prompt.lower():
+                return [event("session.complete", self.session_id, status="completed", summary="Repeated unsupported completion claim for bounded-gate testing.", changedFiles=self.changed_files, checks=[])]
+            if self.stage == "verify":
+                return [event("agent.text", self.session_id, text="The supervisor rejected the premature completion claim. I will run the required targeted verification before attempting a broad check."), event("tool.proposal", self.session_id, tool="process.run", risk="local-execution", arguments={"command": sys.executable, "args": ["-c", "print('targeted syntax check')"], "timeoutMs": 10000}, reason="Run the required targeted verification after supervisor gate feedback.")]
+            return [event("session.complete", self.session_id, status="failed", summary="The provider continuation was requested without an active provider.", changedFiles=self.changed_files, checks=self.verification_checks)]
+        return self._progress_events("plan", "The supervisor rejected the previous completion claim; Forge is continuing from the last verified checkpoint.") + self.provider_turn()
 
     def handle_prompt(self, prompt: str) -> list[dict[str, Any]]:
         self.prompt = prompt
@@ -435,14 +447,15 @@ class MockAgent:
             return [event("agent.text", self.session_id, text="The mock provider has completed a read-only planning pass."), event("agent.checklist", self.session_id, items=task_checklist("summarize", completed={"inspect", "plan", "summarize"}, blocked={"approve", "change", "verify"})), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "done"}, {"key": "current-step", "value": "Read-only planning completed", "status": "done"}, {"key": "inspection", "value": "Repository context reviewed", "status": "done"}, {"key": "change", "value": "No mutation required", "status": "done"}, {"key": "verification", "value": "No command run in read-only plan", "status": "done"}]), event("session.complete", self.session_id, status="completed", summary="Read-only repository inspection and planning completed. No files were changed and no commands were run.", changedFiles=self.changed_files, checks=[])]
         if tool == "workspace.apply_patch" and self.stage == "change":
             self.stage = "verify"
+            self.verification_round = 0
             self.steps[2]["status"] = "complete"
             self.steps[3]["status"] = "active"
             if self.desired_path and self.desired_path not in self.changed_files:
                 self.changed_files.append(self.desired_path)
-            return [event("agent.text", self.session_id, text="The approved patch was applied. I am requesting a bounded verification command."), event("agent.checklist", self.session_id, items=task_checklist("verify", completed={"inspect", "plan", "approve", "change"})), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "active"}, {"key": "current-step", "value": "Run bounded verification", "status": "active"}, {"key": "inspection", "value": "Relevant context reviewed", "status": "done"}, {"key": "change", "value": f"Created {self.desired_path}", "status": "done"}, {"key": "verification", "value": "Awaiting approval for bounded verification command", "status": "active"}]), event("tool.proposal", self.session_id, tool="process.run", risk="local-execution", arguments={"command": sys.executable, "args": ["--version"], "timeoutMs": 10000}, reason="Verify that the local execution path is available after the approved edit.")]
+            if "premature completion" in self.prompt.lower():
+                return [event("agent.text", self.session_id, text="I prematurely claimed completion before verification; the supervisor must reject this claim."), event("session.complete", self.session_id, status="completed", summary="Premature completion claim emitted for supervisor gate testing.", changedFiles=self.changed_files, checks=[])]
+            return [event("agent.text", self.session_id, text="The approved patch was applied. I am requesting a bounded verification command."), event("agent.checklist", self.session_id, items=task_checklist("verify", completed={"inspect", "plan", "approve", "change"})), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "active"}, {"key": "current-step", "value": "Run bounded verification", "status": "active"}, {"key": "inspection", "value": "Relevant context reviewed", "status": "done"}, {"key": "change", "value": f"Created {self.desired_path}", "status": "done"}, {"key": "verification", "value": "Awaiting approval for bounded verification command", "status": "active"}]), event("tool.proposal", self.session_id, tool="process.run", risk="local-execution", arguments={"command": sys.executable, "args": ["-c", "print('targeted syntax check')"], "timeoutMs": 10000}, reason="Verify that the local execution path is available after the approved edit.")]
         if tool == "process.run" and self.stage == "verify":
-            self.stage = "complete"
-            self.steps[3]["status"] = "complete"
             output = payload.get("output") if isinstance(payload.get("output"), dict) else {}
             ok = bool(payload.get("ok")) and output.get("exitCode", 0) == 0
             check = verification_check(
@@ -451,9 +464,17 @@ class MockAgent:
                 fallback="",
                 workspace_fingerprint=self.workspace_fingerprint,
             )
-            status = "completed" if ok else "failed"
-            summary = "Approved file change applied and bounded verification completed." if ok else "Approved file change applied but bounded verification failed."
-            return [event("agent.text", self.session_id, text="The verification command completed. Forge will include its exit status in the session record."), event("agent.checklist", self.session_id, items=task_checklist("summarize", completed={"inspect", "plan", "approve", "change", "verify"} if ok else {"inspect", "plan", "approve", "change"}, blocked=set() if ok else {"verify"})), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "done" if ok else "blocked"}, {"key": "current-step", "value": "Verification completed", "status": "done" if ok else "blocked"}, {"key": "inspection", "value": "Relevant context reviewed", "status": "done"}, {"key": "change", "value": f"Created {self.desired_path}" if self.desired_path else "No mutation", "status": "done"}, {"key": "verification", "value": check["status"], "status": "done" if ok else "blocked"}]), event("session.complete", self.session_id, status=status, summary=summary, changedFiles=self.changed_files, checks=[check])]
+            self.verification_checks.append(check)
+            if not ok:
+                self.stage = "complete"
+                self.steps[3]["status"] = "complete"
+                return [event("agent.text", self.session_id, text="The targeted verification command failed. Forge will preserve the failure evidence."), event("agent.checklist", self.session_id, items=task_checklist("summarize", completed={"inspect", "plan", "approve", "change"}, blocked={"verify"})), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "blocked"}, {"key": "current-step", "value": "Targeted verification failed", "status": "blocked"}, {"key": "inspection", "value": "Relevant context reviewed", "status": "done"}, {"key": "change", "value": f"Created {self.desired_path}" if self.desired_path else "No mutation", "status": "done"}, {"key": "verification", "value": check["status"], "status": "blocked"}]), event("session.complete", self.session_id, status="failed", summary="The bounded targeted verification command failed.", changedFiles=self.changed_files, checks=self.verification_checks)]
+            if self.verification_round == 0:
+                self.verification_round = 1
+                return [event("agent.text", self.session_id, text="Targeted verification passed. I am requesting a separate broad project check before summarizing."), event("agent.checklist", self.session_id, items=task_checklist("verify", completed={"inspect", "plan", "approve", "change"})), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "active"}, {"key": "current-step", "value": "Run broad project verification", "status": "active"}, {"key": "inspection", "value": "Relevant context reviewed", "status": "done"}, {"key": "change", "value": f"Created {self.desired_path}", "status": "done"}, {"key": "verification", "value": "Targeted check passed; broad check pending", "status": "active"}]), event("tool.proposal", self.session_id, tool="process.run", risk="local-execution", arguments={"command": sys.executable, "args": ["-c", "print('full test')"], "timeoutMs": 10000}, reason="Run a separate broad project test after the targeted check passed.")]
+            self.stage = "complete"
+            self.steps[3]["status"] = "complete"
+            return [event("agent.text", self.session_id, text="Targeted and broad verification passed. Forge will include both exit records in the session summary."), event("agent.checklist", self.session_id, items=task_checklist("summarize", completed={"inspect", "plan", "approve", "change", "verify"})), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "done"}, {"key": "current-step", "value": "Verification completed", "status": "done"}, {"key": "inspection", "value": "Relevant context reviewed", "status": "done"}, {"key": "change", "value": f"Created {self.desired_path}" if self.desired_path else "No mutation", "status": "done"}, {"key": "verification", "value": "Targeted and broad checks passed", "status": "done"}]), event("session.complete", self.session_id, status="completed", summary="Approved file change applied and targeted plus broad verification completed.", changedFiles=self.changed_files, checks=self.verification_checks)]
         return [event("agent.text", self.session_id, text="The tool result was received. No further mock-provider action is required.")]
 
 
@@ -526,7 +547,10 @@ def main() -> int:
             if message_type == "session.start":
                 responses = agent.start(payload)
             elif message_type == "user.prompt":
-                responses = agent.handle_prompt(str(payload.get("prompt", "")))
+                if agent.stage != "idle" or (agent.provider is not None and os.environ.get("FORGE_PROVIDER", "mock").lower() not in {"mock", "test"}):
+                    responses = agent.continue_provider(str(payload.get("prompt", "")))
+                else:
+                    responses = agent.handle_prompt(str(payload.get("prompt", "")))
             elif message_type == "tool.result":
                 responses = agent.on_tool_result(payload)
             elif message_type == "session.cancel":

@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { redactValue } from "./redaction.js";
 import type {
+  AgentStateEvent,
   CheckResult,
   ChecklistItem,
   ForgeEvent,
@@ -50,6 +51,7 @@ export interface SessionRecord {
   checklist: ChecklistItem[];
   plan?: PlanSnapshot;
   journal: StepJournalEntry[];
+  executionState?: AgentStateEvent;
   verification: CheckResult[];
   events: ForgeEvent[];
 }
@@ -123,6 +125,9 @@ export class SessionStore {
             : "pending",
           ...(item.note ? { note: String(item.note).slice(0, 500) } : {}),
         })),
+        ...(record.executionState
+          ? { executionState: record.executionState }
+          : {}),
         verification: record.verification.slice(0, 32).map((check) => ({
           ...check,
           command: check.command.slice(0, 500),
@@ -174,6 +179,9 @@ export class SessionStore {
         proposalIds: [],
         toolResults: 0,
       }));
+    }
+    if (sanitized.type === "agent.state") {
+      record.executionState = { ...sanitized };
     }
     if (sanitized.type === "agent.scratchpad") {
       record.scratchpad = sanitized.items.slice(0, 64).map((item) => ({
