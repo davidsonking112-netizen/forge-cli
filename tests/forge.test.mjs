@@ -54,6 +54,10 @@ import {
   clearRepositoryIndex,
   readRepositoryIndex,
 } from "../dist/apps/forge-cli/src/index.js";
+import {
+  chooseMilestoneVerification,
+  classifyVerificationFailure,
+} from "../dist/apps/forge-cli/src/verification.js";
 
 async function tempWorkspace() {
   const directory = await mkdtemp(path.join(os.tmpdir(), "forge-test-"));
@@ -232,11 +236,21 @@ test("v0.9 protocol validation rejects malformed and unbounded event data", () =
     role: "reviewer",
     status: "completed",
     turns: 1,
+    artifact: {
+      version: 1,
+      kind: "reviewer",
+      blockers: [],
+      contradictions: [],
+      nonBlockingImprovements: ["Keep the change bounded."],
+      goNoGo: "go",
+      rationale: "The supplied evidence is internally consistent.",
+    },
     text: "bounded review",
+    parallelReadOnly: true,
     budget: {
       profile: "balanced",
-      plannedRoles: 4,
-      usedRoles: 4,
+      plannedRoles: 5,
+      usedRoles: 5,
       plannedTurns: 8,
       usedTurns: 4,
       contextChars: 1200,
@@ -245,6 +259,50 @@ test("v0.9 protocol validation rejects malformed and unbounded event data", () =
     },
   };
   assert.equal(isForgeEvent(delegation), true);
+  assert.equal(
+    isForgeEvent({
+      ...delegation,
+      artifact: { ...delegation.artifact, goNoGo: "maybe" },
+    }),
+    false,
+  );
+  const dynamicDelegation = {
+    ...createEnvelope("agent.delegation", "session-1"),
+    type: "agent.delegation",
+    role: "custom-security-auditor",
+    status: "completed",
+    turns: 1,
+    artifact: {
+      version: 1,
+      kind: "custom",
+      roleId: "custom-security-auditor",
+      mission: "Review bounded security risks.",
+      findings: ["No credential values were exposed in the supplied context."],
+      evidence: [{ source: "context", detail: "bounded" }],
+      risks: [],
+      recommendedChecks: ["run dependency audit"],
+      unknowns: ["deployment headers"],
+    },
+    text: "bounded custom review",
+    budget: {
+      profile: "quality",
+      plannedRoles: 8,
+      usedRoles: 8,
+      plannedTurns: 16,
+      usedTurns: 8,
+      contextChars: 1200,
+      outputChars: 800,
+      skippedRoles: [],
+    },
+  };
+  assert.equal(isForgeEvent(dynamicDelegation), true);
+  assert.equal(
+    isForgeEvent({
+      ...dynamicDelegation,
+      artifact: { ...dynamicDelegation.artifact, roleId: "custom-other" },
+    }),
+    false,
+  );
   const repair = {
     ...createEnvelope("agent.repair", "session-1"),
     type: "agent.repair",
@@ -1243,6 +1301,78 @@ test("context engine respects ignore patterns and ranks relevant files", async (
   }
 });
 
+test("context includes untracked changes and explicit project contract evidence", async () => {
+  const directory = await tempWorkspace();
+  try {
+    await writeFile(
+      path.join(directory, "package.json"),
+      JSON.stringify({
+        type: "module",
+        scripts: { test: "node --test", typecheck: "tsc --noEmit" },
+      }),
+    );
+    await writeFile(
+      path.join(directory, "FORGE.md"),
+      "Use strict module conventions and verify every milestone.\n",
+    );
+    await mkdir(path.join(directory, "src"));
+    await writeFile(
+      path.join(directory, "src", "target.ts"),
+      "export function target() { return true; }\n",
+    );
+    assert.equal(
+      spawnSync("git", ["init", "-q"], { cwd: directory }).status,
+      0,
+    );
+    spawnSync("git", ["config", "user.email", "forge@example.test"], {
+      cwd: directory,
+    });
+    spawnSync("git", ["config", "user.name", "Forge Test"], { cwd: directory });
+    spawnSync(
+      "git",
+      ["add", "README.md", "app.txt", "package.json", "src/target.ts"],
+      { cwd: directory },
+    );
+    assert.equal(
+      spawnSync("git", ["commit", "-qm", "fixture"], { cwd: directory }).status,
+      0,
+    );
+    await writeFile(
+      path.join(directory, "src", "target.ts"),
+      "export function target() { return false; }\n",
+    );
+    const context = await buildRepositoryContext(
+      directory,
+      "Improve target behavior",
+      { ...DEFAULT_CONTEXT_BUDGET, maxRelevantFiles: 4 },
+      { acceptanceRequirements: ["target behavior must be improved"] },
+    );
+    assert.ok(context.changedFiles.includes("src/target.ts"));
+    assert.equal(context.relevantFiles[0].path, "src/target.ts");
+    assert.ok(
+      context.contextPack.projectContract.conventions.some((value) =>
+        /module|strict|test/i.test(value),
+      ),
+    );
+    assert.match(
+      context.contextPack.projectContract.instructionsExcerpt ?? "",
+      /untrusted|milestone/i,
+    );
+    assert.ok(
+      context.contextPack.acceptanceMap.some((item) =>
+        item.files.includes("src/target.ts"),
+      ),
+    );
+    assert.ok(
+      context.contextPack.symbolSlices.some(
+        (slice) => slice.symbol === "target",
+      ),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("unified diffs apply hunks, create/delete files, and preserve checkpoints", async () => {
   const directory = await tempWorkspace();
   const checkpointDirectory = await mkdtemp(
@@ -1397,6 +1527,40 @@ test("unified diff rejects binary patches, duplicate entries, and oversized head
       ),
     /bounds/i,
   );
+});
+
+test("transactional patches reject oversized or duplicate change units", async () => {
+  const directory = await tempWorkspace();
+  try {
+    const tools = new WorkspaceTools(directory);
+    const oversized = await tools.execute({
+      tool: "workspace.apply_patch",
+      arguments: {
+        files: Array.from({ length: 9 }, (_, index) => ({
+          path: `file-${index}.txt`,
+          content: "x",
+        })),
+      },
+    });
+    assert.equal(oversized.ok, false);
+    assert.match(oversized.error?.message ?? "", /CHANGE_UNIT_TOO_LARGE/);
+    const duplicate = await tools.execute({
+      tool: "workspace.apply_patch",
+      arguments: {
+        files: [
+          { path: "duplicate.txt", content: "one" },
+          { path: "duplicate.txt", content: "two" },
+        ],
+      },
+    });
+    assert.equal(duplicate.ok, false);
+    assert.match(duplicate.error?.message ?? "", /CHANGE_UNIT_INVALID/);
+    await assert.rejects(
+      readFile(path.join(directory, "duplicate.txt"), "utf8"),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("multi-file edits are transactional and checkpoints can be restored", async () => {
@@ -1846,6 +2010,217 @@ test("supervisor carries bounded failure context and attempt history into provid
     );
     assert.doesNotMatch(JSON.stringify(start?.context), /should-not-leak/);
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("milestone verification selects the smallest useful check by changed-file class", () => {
+  const contract = {
+    language: "mixed",
+    packageManager: "npm",
+    framework: null,
+    instructionsFile: null,
+    scripts: {},
+    testCommands: [["npm", "test"]],
+    buildCommands: [["npm", "run", "typecheck"]],
+    entrypoints: ["index.html"],
+  };
+  const files = [
+    { path: "src/math.js", bytes: 1, mtimeMs: 1, content: "" },
+    { path: "src/math.test.mjs", bytes: 1, mtimeMs: 1, content: "" },
+    { path: "src/types.ts", bytes: 1, mtimeMs: 1, content: "" },
+    {
+      path: "examples/fitness-tracker/index.html",
+      bytes: 1,
+      mtimeMs: 1,
+      content: "",
+    },
+    {
+      path: "examples/fitness-tracker/app.js",
+      bytes: 1,
+      mtimeMs: 1,
+      content: "",
+    },
+    { path: "worker.py", bytes: 1, mtimeMs: 1, content: "" },
+    { path: "worker_test.py", bytes: 1, mtimeMs: 1, content: "" },
+  ];
+  assert.equal(
+    chooseMilestoneVerification("m1", ["src/math.js"], files, contract)?.kind,
+    "focused-unit",
+  );
+  assert.deepEqual(
+    chooseMilestoneVerification("m1", ["src/math.js"], files, contract)?.args,
+    ["--test", "src/math.test.mjs"],
+  );
+  assert.equal(
+    chooseMilestoneVerification("m2", ["src/types.ts"], files, contract)?.kind,
+    "typecheck",
+  );
+  assert.equal(
+    chooseMilestoneVerification(
+      "m3",
+      ["examples/fitness-tracker/app.js"],
+      files,
+      contract,
+    )?.kind,
+    "browser-smoke",
+  );
+  assert.equal(
+    chooseMilestoneVerification("m4", ["worker.py"], files, contract)?.kind,
+    "focused-unit",
+  );
+  assert.deepEqual(
+    chooseMilestoneVerification("m4", ["worker.py"], files, contract)?.args,
+    ["-m", "pytest", "worker_test.py"],
+  );
+  assert.equal(
+    chooseMilestoneVerification("m5", ["README.md"], files, contract),
+    null,
+  );
+});
+
+test("milestone verification failure classes select distinct recovery strategies", () => {
+  const cases = [
+    [
+      "syntax-error",
+      "repair-syntax-first",
+      { message: "SyntaxError: unexpected token" },
+    ],
+    [
+      "provider-history",
+      "rebuild-provider-history",
+      { code: "PROVIDER_ERROR", message: "thought_signature missing" },
+    ],
+    [
+      "stale-patch",
+      "refresh-context-rebase",
+      { message: "stale originalSha conflict" },
+    ],
+    ["timeout", "shorten-and-retry", { message: "Command timed out" }],
+    [
+      "browser-regression",
+      "isolate-browser-regression",
+      { kind: "browser-smoke", message: "Uncaught ReferenceError" },
+    ],
+  ];
+  for (const [failureKind, recoveryStrategy, input] of cases) {
+    assert.deepEqual(
+      classifyVerificationFailure({ tool: "process.run", ...input }),
+      { failureKind, recoveryStrategy },
+    );
+  }
+  assert.deepEqual(
+    classifyVerificationFailure({
+      tool: "process.run",
+      message: "exit code 1",
+    }),
+    {
+      failureKind: "command-failure",
+      recoveryStrategy: "change-focused-command",
+    },
+  );
+});
+
+test("protocol validates browser-smoke result metadata", () => {
+  const base = {
+    ...createEnvelope("tool.result", "protocol-verification"),
+    type: "tool.result",
+    tool: "browser.smoke",
+    ok: true,
+    output: { command: "chromium --headless", exitCode: 0, output: "<html>" },
+    approved: true,
+    durationMs: 10,
+    milestoneId: "step-01-ui",
+    verificationKind: "browser-smoke",
+  };
+  assert.equal(isForgeEvent(base), true);
+  assert.equal(
+    isForgeEvent({ ...base, recoveryStrategy: "not-a-strategy" }),
+    false,
+  );
+  assert.equal(isForgeEvent({ ...base, failureKind: "not-a-failure" }), false);
+});
+
+test("browser smoke serves only the approved local workspace and reports script failures", async () => {
+  const directory = await mkdtemp(
+    path.join(os.tmpdir(), "forge-browser-smoke-"),
+  );
+  try {
+    await writeFile(
+      path.join(directory, "index.html"),
+      "<!doctype html><html><body><div id=app></div><script src=app.js></script></body></html>",
+    );
+    await writeFile(
+      path.join(directory, "app.js"),
+      "document.querySelector('#app').textContent = 'SMOKE_OK';",
+    );
+    const tools = new WorkspaceTools(directory);
+    const passed = await tools.execute({
+      tool: "browser.smoke",
+      arguments: { path: "app.js" },
+    });
+    assert.equal(passed.ok, true);
+    assert.equal(passed.output?.exitCode, 0);
+    assert.match(JSON.stringify(passed.output), /SMOKE_OK/);
+    await writeFile(
+      path.join(directory, "app.js"),
+      "throw new Error('SMOKE_FAIL');",
+    );
+    const failed = await tools.execute({
+      tool: "browser.smoke",
+      arguments: { path: "app.js" },
+    });
+    if (process.platform !== "win32") {
+      assert.equal(failed.ok, false);
+      assert.notEqual(failed.output?.exitCode, 0);
+      assert.match(JSON.stringify(failed.output), /SMOKE_FAIL|Uncaught|Error/i);
+    } else {
+      assert.equal(typeof failed.ok, "boolean");
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("supervisor automatically approval-gates browser verification after a UI mutation", async () => {
+  const directory = await mkdtemp(
+    path.join(os.tmpdir(), "forge-auto-verification-"),
+  );
+  const previousProvider = process.env.FORGE_PROVIDER;
+  process.env.FORGE_PROVIDER = "mock";
+  const events = [];
+  try {
+    await writeFile(path.join(directory, "README.md"), "# Fixture\n");
+    await writeFile(
+      path.join(directory, "index.html"),
+      "<!doctype html><script src=app.js></script>",
+    );
+    const result = await new ForgeSupervisor().run({
+      prompt: "Create file app.js",
+      workspace: directory,
+      approve: async () => "approve-once",
+      onEvent: (event) => events.push(event),
+    });
+    assert.equal(result.status, "completed");
+    const proposals = events.filter(
+      (event) =>
+        event.type === "tool.proposal" && event.tool === "browser.smoke",
+    );
+    const results = events.filter(
+      (event) => event.type === "tool.result" && event.tool === "browser.smoke",
+    );
+    assert.equal(proposals.length, 1);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].ok, true);
+    assert.equal(results[0].verificationKind, "browser-smoke");
+    assert.match(results[0].milestoneId, /^step-/);
+    assert.equal(
+      results[0].output?.forgeVerification?.milestoneId,
+      results[0].milestoneId,
+    );
+  } finally {
+    if (previousProvider === undefined) delete process.env.FORGE_PROVIDER;
+    else process.env.FORGE_PROVIDER = previousProvider;
     await rm(directory, { recursive: true, force: true });
   }
 });

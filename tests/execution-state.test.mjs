@@ -100,6 +100,38 @@ test("mutation completion requires a patch plus distinct targeted and broad chec
   assert.equal(machine.current().phase, "full-verify");
 });
 
+test("supervisor-required milestone verification blocks completion until a typed check passes", () => {
+  const machine = new ImplementationStateMachine("Create app.js");
+  machine.initialSnapshots();
+  machine.observe(planEvent());
+  machine.observe(toolResult("workspace.apply_patch", { files: ["app.js"] }));
+  machine.requireMilestoneVerification();
+  const blocked = machine.completionGate(completion([check("npm test")]));
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.reason, /milestone verification/i);
+  const verification = {
+    ...toolResult("process.run", {
+      command: "node --check app.js",
+      exitCode: 0,
+      output: "",
+    }),
+    milestoneId: "step-01-app",
+    verificationKind: "syntax",
+  };
+  machine.recordMilestoneVerification(verification);
+  machine.observe(
+    toolResult("process.run", {
+      command: "npm test",
+      exitCode: 0,
+      output: "ok",
+    }),
+  );
+  const gate = machine.completionGate(
+    completion([check("node --check app.js"), check("npm test")]),
+  );
+  assert.equal(gate.ok, true);
+});
+
 test("model text or a completion claim cannot satisfy mutation evidence gates", () => {
   const machine = new ImplementationStateMachine("Create app.js");
   machine.initialSnapshots();

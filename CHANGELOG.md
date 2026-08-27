@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — supervisor-created specialists and Agents TUI
+
+Forge now retains the five built-in typed specialist roles while allowing the supervisor to create up to three additional task-specific, read-only specialists from bounded templates. Security, dependency, accessibility, UX/browser, backend, data-integrity, performance, release, and complex integration signals can select custom roles. Dynamic artifacts are strictly validated, role IDs are bounded, specialists receive no tools, and the total delegated-agent ceiling is eight.
+
+The full-screen TUI adds an Agents tab with dynamic role status, artifact validity, read-only mode, mission summaries, and bounded role/turn/context/output telemetry. The quality profile can use up to eight specialists; the balanced profile remains five by default. Approval requirements and the TypeScript supervisor’s authority boundary are unchanged.
+
 ## 0.9.9 — 2026-08-26
 
 Forge v0.9.9 adds optional Daytona sandbox support through supervisor-owned, bounded REST operations. Status is read-only; creation, stop, and delete actions require interactive confirmation, API credentials are never persisted or forwarded to the worker, and task cleanup is opt-in through explicit `--daytona-sandbox` and `--daytona-cleanup` flags.

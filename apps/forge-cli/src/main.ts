@@ -90,8 +90,9 @@ Options:
   --workspace <path>     Set the approved workspace root
   --policy safe           Use the default approval policy (default)
   --simple               Disable the full-screen terminal workspace
-  --multi-agent          Enable bounded explorer/implementer/tester/reviewer delegation
-  --max-agents <n>       Limit delegated specialist roles (default: 4)
+  --multi-agent          Enable bounded built-in and supervisor-created specialist delegation
+  --parallel-readonly    Run eligible read-only specialists concurrently with no tools (opt-in)
+  --max-agents <n>       Limit delegated specialist roles (default: 5, hard max: 8)
   --max-total-turns <n>  Limit total delegated provider turns (default: 8)
   --cost-profile <name>  Select economy|balanced|quality specialist budgets
   --no-record            Do not persist this session locally
@@ -284,6 +285,16 @@ function renderEvent(event: ForgeEvent, json: boolean): void {
         if (step.contractErrors.length)
           console.log(`    contract: ${step.contractErrors.join("; ")}`);
       });
+      break;
+    case "agent.delegation":
+      console.log(
+        `\n[ specialist ] ${event.role}: ${event.status} (${event.turns} turn${event.turns === 1 ? "" : "s"})${event.parallelReadOnly ? " [parallel read-only]" : ""}`,
+      );
+      if (event.artifact)
+        console.log(
+          `Artifact: ${event.artifact.kind} v${event.artifact.version} (${Object.keys(event.artifact).length} typed fields)`,
+        );
+      if (event.error) console.log(`Artifact error: ${event.error}`);
       break;
     case "agent.plan":
       console.log("\nPlan:");
@@ -1380,8 +1391,14 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
       { count: number; failures: number; totalMs: number }
     > = {};
     const approvalCounts: Record<string, number> = {};
-    const delegation: Array<{ role: string; status: string; turns: number }> =
-      [];
+    const delegation: Array<{
+      role: string;
+      status: string;
+      turns: number;
+      artifact?: unknown;
+      artifactKind?: string;
+      parallelReadOnly?: boolean;
+    }> = [];
     const repairs: Array<{
       attempt: number;
       strategy: "alternate" | "deep-thinking";
@@ -1448,6 +1465,12 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
           role: event.role,
           status: event.status,
           turns: event.turns,
+          ...(event.artifact
+            ? { artifact: event.artifact, artifactKind: event.artifact.kind }
+            : {}),
+          ...(event.parallelReadOnly === undefined
+            ? {}
+            : { parallelReadOnly: event.parallelReadOnly }),
         });
         if (event.budget) delegationBudget = event.budget;
       }
@@ -2481,8 +2504,11 @@ async function runTask(
       ...(args.flags["multi-agent"] === true
         ? {
             multiAgent: true,
+            ...(args.flags["parallel-readonly"] === true
+              ? { parallelReadOnly: true }
+              : {}),
             ...(typeof args.flags["max-agents"] === "string"
-              ? { maxAgents: boundedFlagInt(args.flags, "max-agents", 4, 1, 4) }
+              ? { maxAgents: boundedFlagInt(args.flags, "max-agents", 5, 1, 8) }
               : {}),
             ...(typeof args.flags["max-total-turns"] === "string"
               ? {

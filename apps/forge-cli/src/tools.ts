@@ -139,6 +139,10 @@ export const TOOL_METADATA: Record<ToolName, ToolMetadata> = {
     risk: "local-execution",
     description: "Run an approved local process",
   },
+  "browser.smoke": {
+    risk: "local-execution",
+    description: "Run a bounded local static-server browser smoke check",
+  },
   "git.status": { risk: "read-only", description: "Inspect Git status" },
   "git.branch": {
     risk: "reversible-write",
@@ -427,6 +431,26 @@ export class WorkspaceTools {
             output: await this.applyUnifiedDiff(request.arguments),
             durationMs: Date.now() - started,
           };
+        case "browser.smoke": {
+          const output = await this.runBrowserSmoke(
+            request.arguments,
+            request.signal,
+          );
+          return {
+            ok: output.exitCode === 0,
+            output,
+            ...(output.exitCode === 0
+              ? {}
+              : {
+                  error: {
+                    code: "BROWSER_SMOKE_FAILED",
+                    message: "The browser smoke check failed",
+                    retryable: true,
+                  },
+                }),
+            durationMs: Date.now() - started,
+          };
+        }
         case "process.run": {
           const output = await this.runProcess(
             request.arguments,
@@ -733,6 +757,22 @@ export class WorkspaceTools {
     }>,
   ): Promise<{ files: string[]; checkpoint: string }> {
     if (!changes.length) throw new Error("At least one file is required");
+    if (changes.length > 8)
+      throw new Error(
+        "CHANGE_UNIT_TOO_LARGE: at most 8 file entries may be changed transactionally",
+      );
+    const totalBytes = changes.reduce(
+      (total, change) => total + Buffer.byteLength(change.content, "utf8"),
+      0,
+    );
+    if (totalBytes > 1_000_000)
+      throw new Error(
+        "CHANGE_UNIT_TOO_LARGE: transactional change content is limited to 1000000 bytes",
+      );
+    if (new Set(changes.map((change) => change.target)).size !== changes.length)
+      throw new Error(
+        "CHANGE_UNIT_INVALID: duplicate file entries are not allowed",
+      );
     const checkpoint = randomUUID();
     const manifest: Array<{
       path: string;
@@ -813,6 +853,195 @@ export class WorkspaceTools {
       args,
       timeoutMs: 10_000,
       maxOutputBytes: 100_000,
+    });
+  }
+
+  private async runBrowserSmoke(
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<{ command: string; exitCode: number; output: string }> {
+    const requestedPath = String(args.path ?? "").replaceAll("\\", "/");
+    this.resolveSafe(requestedPath);
+    let indexPath = requestedPath;
+    let directory = path.posix.dirname(requestedPath);
+    while (true) {
+      const candidate =
+        directory === "." ? "index.html" : `${directory}/index.html`;
+      const exists = await fs
+        .stat(path.join(this.root, candidate))
+        .then((stat) => stat.isFile())
+        .catch(() => false);
+      if (exists) {
+        indexPath = candidate;
+        break;
+      }
+      if (directory === ".") break;
+      directory = path.posix.dirname(directory);
+    }
+    const python =
+      process.env.FORGE_PYTHON ||
+      (process.platform === "win32" ? "python" : "python3");
+    const server = spawn(
+      python,
+      ["-u", "-m", "http.server", "0", "--bind", "127.0.0.1"],
+      { cwd: this.root, env: safeChildEnvironment(), windowsHide: true },
+    );
+    let serverOutput = "";
+    let port: number | undefined;
+    const serverReady = new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        server.stdout.removeListener("data", capture);
+        server.stderr.removeListener("data", capture);
+        server.removeListener("error", onError);
+        server.removeListener("close", onClose);
+        if (error) reject(error);
+        else resolve();
+      };
+      const capture = (chunk: Buffer): void => {
+        if (Buffer.byteLength(serverOutput) < 8_000)
+          serverOutput += chunk
+            .toString("utf8")
+            .slice(0, 8_000 - Buffer.byteLength(serverOutput));
+        const match = serverOutput.match(/port (\d+)/i);
+        const candidatePort = match ? Number(match[1]) : undefined;
+        if (candidatePort && candidatePort > 0 && candidatePort < 65_536) {
+          port = candidatePort;
+          finish();
+        }
+      };
+      const onError = (error: Error): void => finish(error);
+      const onClose = (code: number | null): void =>
+        finish(
+          new Error(`Static server exited before startup (code ${code ?? 1})`),
+        );
+      const timer = setTimeout(
+        () => finish(new Error("Static server startup timed out")),
+        5_000,
+      );
+      server.stdout.on("data", capture);
+      server.stderr.on("data", capture);
+      server.on("error", onError);
+      server.on("close", onClose);
+    });
+    try {
+      await serverReady;
+      if (signal?.aborted) throw new Error("Browser smoke cancelled");
+      const browser = process.platform === "win32" ? "msedge" : "chromium";
+      const url = `http://127.0.0.1:${port}/${indexPath.split("/").map(encodeURIComponent).join("/")}`;
+      const browserArgs = [
+        "--headless",
+        ...(process.platform === "linux"
+          ? ["--no-sandbox", "--disable-dev-shm-usage"]
+          : []),
+        "--disable-gpu",
+        "--enable-logging=stderr",
+        "--log-level=0",
+        "--virtual-time-budget=1500",
+        "--dump-dom",
+        url,
+      ];
+      let result: { exitCode: number; output: string };
+      try {
+        result = await this.runChild(
+          browser,
+          browserArgs,
+          signal,
+          15_000,
+          50_000,
+        );
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT")
+          return {
+            command: `${browser} --headless --dump-dom ${url}`,
+            exitCode: 127,
+            output: `BROWSER_UNAVAILABLE: ${browser} was not found on PATH`,
+          };
+        throw error;
+      }
+      const output = `${result.output}${serverOutput}`.slice(0, 50_000);
+      const browserFailure =
+        /(?:Uncaught|SyntaxError|ReferenceError|Failed to load resource|404 Not Found)/i.test(
+          output,
+        );
+      return {
+        command: `${browser} --headless --dump-dom ${url}`,
+        exitCode:
+          result.exitCode === 0 && !browserFailure ? 0 : result.exitCode || 1,
+        output,
+      };
+    } finally {
+      if (!server.killed && server.exitCode === null) server.kill("SIGTERM");
+      if (server.exitCode === null)
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 1_000);
+          server.once("close", () => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
+    }
+  }
+
+  private async runChild(
+    command: string,
+    commandArgs: string[],
+    signal: AbortSignal | undefined,
+    timeoutMs: number,
+    maxOutputBytes: number,
+  ): Promise<{ exitCode: number; output: string }> {
+    if (signal?.aborted) throw new Error("Command cancelled");
+    return await new Promise((resolve, reject) => {
+      const child = spawn(command, commandArgs, {
+        cwd: this.root,
+        env: safeChildEnvironment(),
+        windowsHide: true,
+      });
+      let output = "";
+      const append = (chunk: Buffer): void => {
+        if (Buffer.byteLength(output) < maxOutputBytes)
+          output += chunk
+            .toString("utf8")
+            .slice(0, maxOutputBytes - Buffer.byteLength(output));
+      };
+      child.stdout.on("data", append);
+      child.stderr.on("data", append);
+      let settled = false;
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const onAbort = (): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        child.kill("SIGTERM");
+        reject(new Error("Command cancelled"));
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        child.kill("SIGTERM");
+        reject(new Error(`Command timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      child.on("error", (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      });
+      child.on("close", (code) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve({ exitCode: code ?? 1, output });
+      });
     });
   }
 

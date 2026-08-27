@@ -85,7 +85,25 @@ class MockProvider:
         on_text: Callable[[str], None] | None = None,
     ) -> ProviderReply:
         del tools
-        text = f"Mock provider response for: {messages[-1].get('content', '')}"
+        system_text = str(messages[0].get("content", "")).lower() if messages else ""
+        custom_match = re.search(r"roleid=(custom-[a-z0-9-]+)", system_text)
+        role = next((candidate for candidate in ("explorer", "architect", "implementer", "tester", "reviewer") if candidate in system_text), None)
+        if custom_match:
+            role_id = custom_match.group(1)
+            artifact = {"version": 1, "kind": "custom", "roleId": role_id, "mission": "Review the bounded task using supplied context.", "findings": ["Deterministic offline specialist evidence is advisory."], "evidence": [{"source": "mock-provider", "detail": "bounded supplied context"}], "risks": ["live provider behavior is unverified"], "recommendedChecks": ["run the supervisor-selected verification"], "unknowns": ["deployment state"]}
+        elif role == "explorer":
+            artifact = {"version": 1, "kind": role, "files": [{"path": "README.md", "relevance": "project guidance", "evidence": "supplied context"}], "symbols": [], "conventions": ["follow supplied project scripts"], "risks": ["provider output remains advisory"], "unknowns": ["runtime state"], "evidence": [{"source": "context", "detail": "bounded repository context"}]}
+        elif role == "architect":
+            artifact = {"version": 1, "kind": role, "milestoneGraph": [{"localId": "m1", "title": "Bounded implementation", "description": "Implement the requested change", "expectedFiles": [], "dependsOn": [], "risks": ["scope drift"], "tests": ["project verification"], "postconditions": ["supervisor evidence is recorded"]}], "acceptanceMapping": [{"requirement": "requested goal is addressed", "files": [], "tests": ["project verification"]}], "assumptions": ["context is current"], "unknowns": ["provider-specific details"]}
+        elif role == "implementer":
+            artifact = {"version": 1, "kind": role, "proposedDiff": "No executable diff proposed by deterministic fixture.", "affectedFiles": ["README.md"], "preconditions": ["supervisor review is complete"], "rollbackNotes": ["restore the supervisor checkpoint"], "postconditions": ["targeted verification passes"]}
+        elif role == "tester":
+            artifact = {"version": 1, "kind": role, "testMatrix": [{"area": "bounded regression", "command": "project verification", "expectedEvidence": "structured passing result"}], "unverifiedChecks": ["live provider behavior"], "coverageGaps": ["deployment environment"]}
+        elif role == "reviewer":
+            artifact = {"version": 1, "kind": role, "blockers": [], "contradictions": [], "nonBlockingImprovements": ["replace fixture evidence with live repository evidence"], "goNoGo": "go", "rationale": "The deterministic artifact is bounded and advisory."}
+        else:
+            artifact = None
+        text = json.dumps(artifact, ensure_ascii=False) if artifact is not None else f"Mock provider response for: {messages[-1].get('content', '')}"
         if on_text:
             on_text(text)
         return ProviderReply(text=text)

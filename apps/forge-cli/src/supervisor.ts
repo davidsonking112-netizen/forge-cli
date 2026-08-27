@@ -36,6 +36,11 @@ import {
   type ExecutionStateSnapshot,
 } from "./execution-state.js";
 import { DependencyGraph } from "./dependency-graph.js";
+import {
+  chooseMilestoneVerification,
+  classifyVerificationFailure,
+  type MilestoneVerificationPlan,
+} from "./verification.js";
 
 const FORGE_VERSION = "0.9.9";
 
@@ -47,6 +52,7 @@ export interface RunOptions {
   approveAll?: boolean;
   multiAgent?: boolean;
   maxAgents?: number;
+  parallelReadOnly?: boolean;
   maxTotalTurns?: number;
   costProfile?: "economy" | "balanced" | "quality";
   systemPrompt?: string;
@@ -88,6 +94,9 @@ function extractScopePaths(arguments_: Record<string, unknown>): string[] {
     for (const file of arguments_.files.slice(0, 100))
       if (file && typeof file === "object")
         add((file as Record<string, unknown>).path);
+  if (typeof arguments_.diff === "string")
+    for (const match of arguments_.diff.matchAll(/^\+\+\+ b\/(.+)$/gm))
+      add(match[1]);
   return [...new Set(values)].slice(0, 100);
 }
 
@@ -232,6 +241,202 @@ export class ForgeSupervisor {
       options.onEvent?.(event);
     };
 
+    const executeMilestoneCheck = async (
+      plan: MilestoneVerificationPlan,
+    ): Promise<ToolResultEvent> => {
+      const arguments_: Record<string, unknown> =
+        plan.tool === "browser.smoke"
+          ? { path: plan.args[0] ?? "" }
+          : { command: plan.command, args: plan.args, timeoutMs: 120_000 };
+      const proposal: ToolProposalEvent = {
+        ...createEnvelope("tool.proposal", session.id),
+        type: "tool.proposal",
+        tool: plan.tool,
+        risk: "local-execution",
+        arguments: arguments_,
+        reason: plan.reason,
+      };
+      await emit(proposal);
+      const needsApproval = policy.requiresApproval(proposal.risk);
+      const policyAllowed = policy.isAllowed(proposal.risk, proposal.tool);
+      let decision: "approve-once" | "approve-session" | "deny" | "cancel" =
+        "approve-once";
+      let approved = !needsApproval && policyAllowed;
+      if (needsApproval) {
+        if (options.approveAll) {
+          approved = policyAllowed;
+          decision = approved ? "approve-session" : "deny";
+        } else if (
+          approvalMode === "session-approve" &&
+          approvalScope &&
+          new Date(approvalScope.expiresAt).getTime() > Date.now() &&
+          approvalScope.tool === proposal.tool &&
+          approvalScope.argumentDigest ===
+            this.argumentDigest(proposal.arguments)
+        ) {
+          approved = policyAllowed;
+          decision = approved ? "approve-session" : "deny";
+        } else if (options.approve) {
+          decision = options.signal?.aborted
+            ? "cancel"
+            : await options.approve(proposal);
+          approved =
+            (decision === "approve-once" || decision === "approve-session") &&
+            policyAllowed;
+          if (decision === "approve-session") {
+            approvalMode = "session-approve";
+            approvalScope = this.createApprovalScope(proposal);
+          }
+        } else {
+          approved = false;
+          decision = "deny";
+        }
+      }
+      await emit({
+        ...createEnvelope("approval.result", session.id),
+        type: "approval.result",
+        proposalId: proposal.id,
+        decision,
+        category: !policyAllowed
+          ? "policy"
+          : needsApproval
+            ? "user"
+            : "automatic",
+        ...(decision === "approve-session" && approvalScope
+          ? { scope: approvalScope }
+          : {}),
+      });
+      const result = approved
+        ? await tools.execute({
+            tool: proposal.tool,
+            arguments: proposal.arguments,
+            ...(options.signal ? { signal: options.signal } : {}),
+          })
+        : {
+            ok: false,
+            error: {
+              code:
+                decision === "cancel"
+                  ? "APPROVAL_CANCELLED"
+                  : "APPROVAL_DENIED",
+              message: "The milestone verification was not approved.",
+              retryable: false,
+            },
+            durationMs: 0,
+          };
+      const output =
+        result.output && typeof result.output === "object"
+          ? (result.output as Record<string, unknown>)
+          : {};
+      const failure = !result.ok
+        ? classifyVerificationFailure({
+            tool: plan.tool,
+            kind: plan.kind,
+            ...(result.error?.code ? { code: result.error.code } : {}),
+            ...(result.error?.message ? { message: result.error.message } : {}),
+            output: String(output.output ?? ""),
+          })
+        : undefined;
+      const priorAttempts = [...attemptHistory];
+      let resultEvent: ToolResultEvent = {
+        ...createEnvelope("tool.result", session.id),
+        type: "tool.result",
+        tool: proposal.tool,
+        ok: result.ok,
+        ...(result.output === undefined ? {} : { output: result.output }),
+        ...(result.error === undefined ? {} : { error: result.error }),
+        approved,
+        durationMs: result.durationMs,
+        milestoneId: plan.milestoneId,
+        verificationKind: plan.kind,
+        ...(failure
+          ? {
+              failureKind: failure.failureKind,
+              recoveryStrategy: failure.recoveryStrategy,
+            }
+          : {}),
+      };
+      const evidenceOutput =
+        result.output &&
+        typeof result.output === "object" &&
+        !Array.isArray(result.output)
+          ? (result.output as Record<string, unknown>)
+          : {};
+      const evidence = {
+        milestoneId: plan.milestoneId,
+        verificationKind: plan.kind,
+        command:
+          typeof evidenceOutput.command === "string"
+            ? evidenceOutput.command
+            : [plan.command, ...plan.args].join(" "),
+        ...(typeof evidenceOutput.exitCode === "number"
+          ? { exitCode: evidenceOutput.exitCode }
+          : {}),
+        output: String(
+          redactValue(
+            typeof evidenceOutput.output === "string"
+              ? evidenceOutput.output
+              : (result.error?.message ?? ""),
+          ),
+        ).slice(0, 20_000),
+        changedFiles: [...observedChangedFiles].slice(0, 200),
+        workspaceFingerprint,
+        priorRepairAttempts: priorAttempts.slice(-8),
+        ...(failure
+          ? {
+              failureKind: failure.failureKind,
+              recoveryStrategy: failure.recoveryStrategy,
+            }
+          : {}),
+      };
+      resultEvent = {
+        ...resultEvent,
+        output: { ...evidenceOutput, forgeVerification: evidence },
+      };
+      await emit(resultEvent);
+      const snapshot = stateMachine.recordMilestoneVerification(resultEvent);
+      if (snapshot) await emit(this.executionStateEvent(session.id, snapshot));
+      if (!result.ok) {
+        const failureRecord: ContextFailure = {
+          milestoneId: plan.milestoneId,
+          tool: plan.tool,
+          command:
+            typeof output.command === "string"
+              ? output.command
+              : [plan.command, ...plan.args].join(" "),
+          ...(typeof output.exitCode === "number"
+            ? { exitCode: output.exitCode }
+            : {}),
+          output: String(
+            redactValue(
+              [result.error?.message, output.output]
+                .filter(Boolean)
+                .join("\\n"),
+            ),
+          ).slice(0, 20_000),
+          changedFiles: [...observedChangedFiles].slice(0, 200),
+          workspaceFingerprint,
+          ...(failure
+            ? {
+                failureKind: failure.failureKind,
+                recoveryStrategy: failure.recoveryStrategy,
+              }
+            : {}),
+        };
+        failureContext.push(failureRecord);
+        while (failureContext.length > 8) failureContext.shift();
+        attemptHistory.push({
+          strategy: failure?.recoveryStrategy ?? "change-focused-command",
+          reason: failureRecord.output.slice(0, 1_000),
+          outcome: "failed",
+        });
+        while (attemptHistory.length > 8) attemptHistory.shift();
+        repositoryContext.contextPack.failureContext = [...failureContext];
+        repositoryContext.contextPack.attemptHistory = [...attemptHistory];
+      }
+      return resultEvent;
+    };
+
     const readline = createInterface({ input: worker.stdout });
     const processing = (async (): Promise<void> => {
       for await (const line of readline) {
@@ -283,7 +488,10 @@ export class ForgeSupervisor {
           };
         }
         if (event.type === "tool.proposal") {
-          const graphGate = dependencyGraph?.actionGate(event.tool);
+          const graphGate = dependencyGraph?.actionGate(
+            event.tool,
+            extractScopePaths(event.arguments),
+          );
           if (dependencyGraph && graphGate && !graphGate.ok) {
             await emit(event);
             await emit(
@@ -534,7 +742,7 @@ export class ForgeSupervisor {
                   },
                   durationMs: 0,
                 };
-          const resultEvent: ToolResultEvent = {
+          let resultEvent: ToolResultEvent = {
             ...createEnvelope("tool.result", session.id),
             type: "tool.result",
             tool: event.tool,
@@ -561,6 +769,85 @@ export class ForgeSupervisor {
                   observedChangedFiles.add(file.replaceAll("\\", "/"));
               });
           }
+          const resultSnapshot = stateMachine.observe(resultEvent);
+          if (resultSnapshot)
+            await emit(this.executionStateEvent(session.id, resultSnapshot));
+          const isMutation = [
+            "workspace.apply_patch",
+            "workspace.apply_unified_diff",
+            "git.branch",
+            "git.stage",
+            "git.commit",
+          ].includes(event.tool);
+          if (resultEvent.ok && isMutation) {
+            const changed = [...observedChangedFiles].slice(0, 200);
+            const milestoneId =
+              dependencyGraph?.currentStepId() ??
+              `milestone-${stateMachine.current().stepIndex}`;
+            const plan = chooseMilestoneVerification(
+              milestoneId,
+              changed,
+              repositoryContext.files,
+              repositoryContext.contextPack.projectContract,
+            );
+            if (plan) {
+              stateMachine.requireMilestoneVerification();
+              const verificationResult = await executeMilestoneCheck(plan);
+              const mutationOutput =
+                resultEvent.output &&
+                typeof resultEvent.output === "object" &&
+                !Array.isArray(resultEvent.output)
+                  ? (resultEvent.output as Record<string, unknown>)
+                  : {};
+              const verificationOutput =
+                verificationResult.output &&
+                typeof verificationResult.output === "object" &&
+                !Array.isArray(verificationResult.output)
+                  ? (verificationResult.output as Record<string, unknown>)
+                  : {};
+              resultEvent = {
+                ...resultEvent,
+                output: {
+                  ...mutationOutput,
+                  forgeVerification: {
+                    milestoneId: plan.milestoneId,
+                    verificationKind: plan.kind,
+                    ok: verificationResult.ok,
+                    command:
+                      verificationOutput.command ??
+                      [plan.command, ...plan.args].join(" "),
+                    ...(typeof verificationOutput.exitCode === "number"
+                      ? { exitCode: verificationOutput.exitCode }
+                      : {}),
+                    output: String(
+                      redactValue(
+                        typeof verificationOutput.output === "string"
+                          ? verificationOutput.output
+                          : (verificationResult.error?.message ?? ""),
+                      ),
+                    ).slice(0, 20_000),
+                    changedFiles: changed,
+                    workspaceFingerprint,
+                    priorRepairAttempts: attemptHistory.slice(-8),
+                    ...(verificationResult.failureKind
+                      ? { failureKind: verificationResult.failureKind }
+                      : {}),
+                    ...(verificationResult.recoveryStrategy
+                      ? {
+                          recoveryStrategy: verificationResult.recoveryStrategy,
+                        }
+                      : {}),
+                  },
+                },
+              };
+              const verificationSnapshot =
+                stateMachine.recordMilestoneVerification(verificationResult);
+              if (verificationSnapshot)
+                await emit(
+                  this.executionStateEvent(session.id, verificationSnapshot),
+                );
+            }
+          }
           if (!resultEvent.ok) {
             const output =
               resultEvent.output && typeof resultEvent.output === "object"
@@ -579,6 +866,23 @@ export class ForgeSupervisor {
             ]
               .filter((value): value is string => Boolean(value))
               .join("\n");
+            const failureClassification =
+              resultEvent.tool === "process.run" ||
+              resultEvent.tool === "browser.smoke"
+                ? classifyVerificationFailure({
+                    tool: resultEvent.tool,
+                    ...(resultEvent.tool === "browser.smoke"
+                      ? { kind: "browser-smoke" as const }
+                      : {}),
+                    ...(resultEvent.error?.code
+                      ? { code: resultEvent.error.code }
+                      : {}),
+                    ...(resultEvent.error?.message
+                      ? { message: resultEvent.error.message }
+                      : {}),
+                    output: failureOutput,
+                  })
+                : undefined;
             const failure: ContextFailure = {
               tool: resultEvent.tool,
               ...(command ? { command } : {}),
@@ -590,11 +894,19 @@ export class ForgeSupervisor {
                 20_000,
               ),
               changedFiles: [...observedChangedFiles].slice(0, 200),
+              workspaceFingerprint,
+              ...(failureClassification
+                ? {
+                    failureKind: failureClassification.failureKind,
+                    recoveryStrategy: failureClassification.recoveryStrategy,
+                  }
+                : {}),
             };
             failureContext.push(failure);
             while (failureContext.length > 8) failureContext.shift();
             attemptHistory.push({
-              strategy: "bounded-repair",
+              strategy:
+                failureClassification?.recoveryStrategy ?? "bounded-repair",
               reason: failure.output.slice(0, 1_000),
               outcome:
                 resultEvent.error?.code === "APPROVAL_DENIED"
@@ -605,9 +917,6 @@ export class ForgeSupervisor {
             repositoryContext.contextPack.failureContext = [...failureContext];
             repositoryContext.contextPack.attemptHistory = [...attemptHistory];
           }
-          const resultSnapshot = stateMachine.observe(resultEvent);
-          if (resultSnapshot)
-            await emit(this.executionStateEvent(session.id, resultSnapshot));
           if (
             dependencyGraph &&
             resultEvent.ok &&
@@ -759,6 +1068,9 @@ export class ForgeSupervisor {
       ...(options.maxAgents === undefined
         ? {}
         : { FORGE_MAX_AGENTS: String(options.maxAgents) }),
+      ...(options.parallelReadOnly === undefined
+        ? {}
+        : { FORGE_PARALLEL_READONLY: options.parallelReadOnly ? "1" : "0" }),
       ...(options.maxTotalTurns === undefined
         ? {}
         : { FORGE_MAX_TOTAL_TURNS: String(options.maxTotalTurns) }),

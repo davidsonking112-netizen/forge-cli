@@ -2,6 +2,7 @@ import type {
   AgentPlanEvent,
   ForgeEvent,
   SessionCompleteEvent,
+  ToolResultEvent,
 } from "../../../packages/protocol/src/index.js";
 import type { ToolName } from "../../../packages/protocol/src/index.js";
 
@@ -205,6 +206,7 @@ export class ImplementationStateMachine {
   private fullVerificationPassed = false;
   private verificationCount = 0;
   private mutationCount = 0;
+  private pendingMilestoneVerifications = 0;
   private repairCount = 0;
   private hasFailure = false;
   private hasSummary = false;
@@ -272,6 +274,7 @@ export class ImplementationStateMachine {
         event.ok,
         event.output,
         event.error?.message,
+        event.verificationKind,
       );
     if (event.type === "error") {
       this.hasFailure = true;
@@ -350,6 +353,7 @@ export class ImplementationStateMachine {
             "Mutation task completed without a successful approved change and changed-file evidence.",
         };
       if (
+        this.pendingMilestoneVerifications > 0 ||
         !this.targetedVerificationPassed ||
         !this.fullVerificationPassed ||
         event.checks.length === 0 ||
@@ -358,7 +362,7 @@ export class ImplementationStateMachine {
         return {
           ok: false,
           reason:
-            "Mutation task completed without both passing targeted and full supervisor verification evidence.",
+            "Mutation task completed without passing supervisor milestone verification for every mutation plus both targeted and full verification evidence.",
         };
     } else if (!this.inspectionEvidence && !this.planReady) {
       return {
@@ -398,7 +402,7 @@ export class ImplementationStateMachine {
         "blocked",
       );
     }
-    if (tool === "process.run")
+    if (tool === "process.run" || tool === "browser.smoke")
       return this.transitionTo(
         this.mutationApplied ? "targeted-verify" : "full-verify",
         `Awaiting approval for verification command ${tool}.`,
@@ -421,6 +425,7 @@ export class ImplementationStateMachine {
     ok: boolean,
     output: unknown,
     error?: string,
+    verificationKind?: ToolResultEvent["verificationKind"],
   ): ExecutionStateSnapshot | undefined {
     if (!ok) {
       this.hasFailure = true;
@@ -453,7 +458,7 @@ export class ImplementationStateMachine {
         `${tool} succeeded with ${changed.length || 1} mutation evidence item(s).`,
       );
     }
-    if (tool === "process.run") {
+    if (tool === "process.run" || tool === "browser.smoke") {
       this.verificationCount += 1;
       const record =
         output && typeof output === "object" && !Array.isArray(output)
@@ -462,9 +467,11 @@ export class ImplementationStateMachine {
       const exitCode = record.exitCode;
       const command = String(record.command ?? "");
       this.verificationPassed = ok && exitCode === 0;
-      const targetedCheck = /--check\b|\bsyntax\b|\bfocused\b|\bsmoke\b/i.test(
-        command,
-      );
+      const targetedCheck =
+        verificationKind !== undefined
+          ? verificationKind !== "broad"
+          : tool === "browser.smoke" ||
+            /--check\b|\bsyntax\b|\bfocused\b|\bsmoke\b/i.test(command);
       const broadCheck =
         !targetedCheck &&
         /\b(test|build|typecheck|check|verify|lint|compile)\b/i.test(command);
@@ -488,6 +495,48 @@ export class ImplementationStateMachine {
       );
     }
     return undefined;
+  }
+
+  public requireMilestoneVerification(): void {
+    this.pendingMilestoneVerifications += 1;
+  }
+
+  public recordMilestoneVerification(
+    event: ToolResultEvent,
+  ): ExecutionStateSnapshot | undefined {
+    if (
+      !event.milestoneId ||
+      (event.tool !== "process.run" && event.tool !== "browser.smoke")
+    )
+      return undefined;
+    const output =
+      event.output &&
+      typeof event.output === "object" &&
+      !Array.isArray(event.output)
+        ? (event.output as Record<string, unknown>)
+        : {};
+    const passed = event.ok && output.exitCode === 0;
+    this.verificationCount += 1;
+    if (passed) {
+      this.pendingMilestoneVerifications = Math.max(
+        0,
+        this.pendingMilestoneVerifications - 1,
+      );
+      this.verificationPassed = true;
+      this.targetedVerificationPassed = true;
+      return this.transitionTo(
+        this.fullVerificationPassed ? "full-verify" : "evidence",
+        `Supervisor-required milestone ${event.milestoneId} passed ${event.verificationKind ?? event.tool}.`,
+        event.milestoneId,
+      );
+    }
+    this.hasFailure = true;
+    return this.transitionTo(
+      "repair",
+      `Supervisor-required milestone ${event.milestoneId} failed: ${event.failureKind ?? event.error?.message ?? "no exit-code evidence"}.`,
+      event.milestoneId,
+      "blocked",
+    );
   }
 
   private extractChangedFiles(output: unknown): string[] {

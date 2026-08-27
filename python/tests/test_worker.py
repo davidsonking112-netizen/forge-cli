@@ -124,13 +124,17 @@ class WorkerTests(unittest.TestCase):
             def complete(self, *, messages, tools, on_text=None):
                 self.calls += 1
                 self.requests.append({"messages": messages, "tools": tools})
-                return ProviderReply(text=f"role response {self.calls}")
+                if "explorer" in messages[0]["content"]:
+                    value = {"version": 1, "kind": "explorer", "files": [{"path": "README.md", "relevance": "context", "evidence": "supplied"}], "symbols": [], "conventions": ["bounded"], "risks": ["scope"], "unknowns": ["runtime"], "evidence": [{"source": "context", "detail": "bounded"}]}
+                else:
+                    value = {"version": 1, "kind": "architect", "milestoneGraph": [{"localId": "m1", "title": "Plan", "description": "Plan change", "expectedFiles": [], "dependsOn": [], "risks": ["scope"], "tests": ["npm test"], "postconditions": ["evidence"]}], "acceptanceMapping": [{"requirement": "goal", "files": [], "tests": ["npm test"]}], "assumptions": ["context"], "unknowns": ["runtime"]}
+                return ProviderReply(text=json.dumps(value))
 
         provider = FakeProvider()
         report = BoundedOrchestrator(max_agents=2, max_total_turns=2).run(provider=provider, goal="review code", context="bounded context")
         self.assertEqual(provider.calls, 2)
-        self.assertEqual([result.role for result in report.results], ["explorer", "implementer"])
-        self.assertIn("role response 1", report.merged_summary)
+        self.assertEqual([result.role for result in report.results], ["explorer", "architect"])
+        self.assertIn('"kind":"explorer"', report.merged_summary)
         self.assertEqual(provider.calls, 2)
         self.assertTrue(all("Never spawn agents" in call["messages"][0]["content"] for call in provider.requests))
         self.assertEqual([call["tools"] for call in provider.requests], [[], []])
@@ -151,8 +155,8 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(any(event["type"] == "session.complete" for event in events))
 
     def test_cost_scope_is_conservative_for_high_risk_goals(self):
-        self.assertEqual(selected_roles("summarize the repository", 2), ("explorer", "implementer"))
-        self.assertEqual(selected_roles("create a new file safely", 2), ("explorer", "implementer", "tester", "reviewer"))
+        self.assertEqual(selected_roles("summarize the repository", 2), ("explorer", "architect"))
+        self.assertEqual(selected_roles("create a new file safely", 2), ("explorer", "architect", "implementer", "tester", "reviewer"))
 
     def test_role_contracts_are_detailed_and_empty_output_fails_closed(self):
         class EmptyProvider:

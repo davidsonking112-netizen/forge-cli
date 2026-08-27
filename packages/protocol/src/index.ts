@@ -18,6 +18,7 @@ export type ToolName =
   | "workspace.apply_patch"
   | "workspace.apply_unified_diff"
   | "process.run"
+  | "browser.smoke"
   | "git.status"
   | "git.branch"
   | "git.stage"
@@ -97,13 +98,92 @@ export interface AgentChecklistEvent extends BaseEvent {
   items: ChecklistItem[];
 }
 
+export interface SpecialistArtifactBase {
+  version: 1;
+  kind:
+    "explorer" | "architect" | "implementer" | "tester" | "reviewer" | "custom";
+}
+export interface ExplorerArtifact extends SpecialistArtifactBase {
+  kind: "explorer";
+  files: Array<{ path: string; relevance: string; evidence: string }>;
+  symbols: Array<{ path: string; name: string; kind: string; reason: string }>;
+  conventions: string[];
+  risks: string[];
+  unknowns: string[];
+  evidence: Array<{ source: string; detail: string }>;
+}
+export interface ArchitectArtifact extends SpecialistArtifactBase {
+  kind: "architect";
+  milestoneGraph: Array<{
+    localId: string;
+    title: string;
+    description: string;
+    expectedFiles: string[];
+    dependsOn: string[];
+    risks: string[];
+    tests: string[];
+    postconditions: string[];
+  }>;
+  acceptanceMapping: Array<{
+    requirement: string;
+    files: string[];
+    tests: string[];
+  }>;
+  assumptions: string[];
+  unknowns: string[];
+}
+export interface ImplementerArtifact extends SpecialistArtifactBase {
+  kind: "implementer";
+  proposedDiff: string;
+  affectedFiles: string[];
+  preconditions: string[];
+  rollbackNotes: string[];
+  postconditions: string[];
+}
+export interface TesterArtifact extends SpecialistArtifactBase {
+  kind: "tester";
+  testMatrix: Array<{
+    area: string;
+    command: string;
+    expectedEvidence: string;
+  }>;
+  unverifiedChecks: string[];
+  coverageGaps: string[];
+}
+export interface ReviewerArtifact extends SpecialistArtifactBase {
+  kind: "reviewer";
+  blockers: string[];
+  contradictions: string[];
+  nonBlockingImprovements: string[];
+  goNoGo: "go" | "no-go";
+  rationale: string;
+}
+export interface DynamicSpecialistArtifact extends SpecialistArtifactBase {
+  kind: "custom";
+  roleId: string;
+  mission: string;
+  findings: string[];
+  evidence: Array<{ source: string; detail: string }>;
+  risks: string[];
+  recommendedChecks: string[];
+  unknowns: string[];
+}
+export type SpecialistArtifact =
+  | ExplorerArtifact
+  | ArchitectArtifact
+  | ImplementerArtifact
+  | TesterArtifact
+  | ReviewerArtifact
+  | DynamicSpecialistArtifact;
 export interface AgentDelegationEvent extends BaseEvent {
   type: "agent.delegation";
-  role: "explorer" | "implementer" | "tester" | "reviewer";
+  role: string;
   status: "completed" | "failed" | "skipped";
   turns: number;
-  text: string;
+  artifact?: SpecialistArtifact;
+  text?: string;
   error?: string;
+  parallelReadOnly?: boolean;
   budget?: {
     profile: "economy" | "balanced" | "quality";
     plannedRoles: number;
@@ -238,6 +318,23 @@ export interface ToolResultEvent extends BaseEvent {
   error?: ToolError;
   approved: boolean;
   durationMs: number;
+  milestoneId?: string;
+  verificationKind?:
+    "focused-unit" | "typecheck" | "browser-smoke" | "syntax" | "broad";
+  failureKind?:
+    | "syntax-error"
+    | "provider-history"
+    | "stale-patch"
+    | "timeout"
+    | "browser-regression"
+    | "command-failure";
+  recoveryStrategy?:
+    | "repair-syntax-first"
+    | "rebuild-provider-history"
+    | "refresh-context-rebase"
+    | "shorten-and-retry"
+    | "isolate-browser-regression"
+    | "change-focused-command";
 }
 
 export interface ToolError {
@@ -333,6 +430,7 @@ const knownTools = new Set<ToolName>([
   "workspace.apply_patch",
   "workspace.apply_unified_diff",
   "process.run",
+  "browser.smoke",
   "git.status",
   "git.branch",
   "git.stage",
@@ -453,18 +551,144 @@ function validDependencyGraphStep(value: unknown): boolean {
   );
 }
 
+function validSpecialistArtifact(value: unknown): value is SpecialistArtifact {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const artifact = value as Record<string, unknown>;
+  if (artifact.version !== 1 || !protocolString(artifact.kind, 32))
+    return false;
+  const strings = (
+    candidate: unknown,
+    maxItems: number,
+    maxLength: number,
+    nonEmpty = false,
+  ): boolean =>
+    protocolArray(candidate, maxItems) &&
+    (!nonEmpty || candidate.length > 0) &&
+    candidate.every(
+      (item) => protocolString(item, maxLength) && item.trim().length > 0,
+    );
+  const objects = (
+    candidate: unknown,
+    maxItems: number,
+  ): candidate is Record<string, unknown>[] =>
+    protocolArray(candidate, maxItems) &&
+    candidate.every(
+      (item) => !!item && typeof item === "object" && !Array.isArray(item),
+    );
+  const has = (
+    item: Record<string, unknown>,
+    key: string,
+    maxLength: number,
+  ): boolean =>
+    protocolString(item[key], maxLength) && String(item[key]).trim().length > 0;
+  switch (artifact.kind) {
+    case "explorer":
+      return (
+        objects(artifact.files, 128) &&
+        artifact.files.every(
+          (item) =>
+            has(item, "path", 500) &&
+            has(item, "relevance", 500) &&
+            has(item, "evidence", 1_000),
+        ) &&
+        objects(artifact.symbols, 128) &&
+        artifact.symbols.every(
+          (item) =>
+            has(item, "path", 500) &&
+            has(item, "name", 200) &&
+            has(item, "kind", 100) &&
+            has(item, "reason", 500),
+        ) &&
+        strings(artifact.conventions, 32, 1_000) &&
+        strings(artifact.risks, 32, 1_000) &&
+        strings(artifact.unknowns, 32, 1_000) &&
+        objects(artifact.evidence, 128) &&
+        artifact.evidence.every(
+          (item) => has(item, "source", 500) && has(item, "detail", 1_000),
+        )
+      );
+    case "architect":
+      return (
+        objects(artifact.milestoneGraph, 64) &&
+        artifact.milestoneGraph.every(
+          (item) =>
+            has(item, "localId", 200) &&
+            has(item, "title", 500) &&
+            has(item, "description", 2_000) &&
+            strings(item.expectedFiles, 64, 500) &&
+            strings(item.dependsOn, 64, 200) &&
+            strings(item.risks, 16, 500) &&
+            strings(item.tests, 32, 500, true) &&
+            strings(item.postconditions, 16, 1_000, true),
+        ) &&
+        objects(artifact.acceptanceMapping, 64) &&
+        artifact.acceptanceMapping.every(
+          (item) =>
+            has(item, "requirement", 1_000) &&
+            strings(item.files, 64, 500) &&
+            strings(item.tests, 32, 500),
+        ) &&
+        strings(artifact.assumptions, 32, 1_000) &&
+        strings(artifact.unknowns, 32, 1_000)
+      );
+    case "implementer":
+      return (
+        has(artifact, "proposedDiff", 100_000) &&
+        strings(artifact.affectedFiles, 64, 500, true) &&
+        strings(artifact.preconditions, 32, 1_000, true) &&
+        strings(artifact.rollbackNotes, 32, 1_000, true) &&
+        strings(artifact.postconditions, 32, 1_000, true)
+      );
+    case "tester":
+      return (
+        objects(artifact.testMatrix, 64) &&
+        artifact.testMatrix.every(
+          (item) =>
+            has(item, "area", 500) &&
+            has(item, "command", 1_000) &&
+            has(item, "expectedEvidence", 1_000),
+        ) &&
+        strings(artifact.unverifiedChecks, 64, 1_000) &&
+        strings(artifact.coverageGaps, 64, 1_000)
+      );
+    case "reviewer":
+      return (
+        strings(artifact.blockers, 64, 1_000) &&
+        strings(artifact.contradictions, 64, 1_000) &&
+        strings(artifact.nonBlockingImprovements, 64, 1_000) &&
+        (artifact.goNoGo === "go" || artifact.goNoGo === "no-go") &&
+        has(artifact, "rationale", 2_000)
+      );
+    case "custom":
+      return (
+        has(artifact, "roleId", 64) &&
+        /^custom-[a-z0-9]+(?:-[a-z0-9]+){0,5}$/.test(String(artifact.roleId)) &&
+        has(artifact, "mission", 1_000) &&
+        strings(artifact.findings, 64, 1_000) &&
+        objects(artifact.evidence, 64) &&
+        artifact.evidence.every(
+          (item) => has(item, "source", 500) && has(item, "detail", 1_000),
+        ) &&
+        strings(artifact.risks, 32, 1_000) &&
+        strings(artifact.recommendedChecks, 32, 1_000) &&
+        strings(artifact.unknowns, 32, 1_000)
+      );
+    default:
+      return false;
+  }
+}
 function validDelegationBudget(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const budget = value as Record<string, unknown>;
   return (
     ["economy", "balanced", "quality"].includes(String(budget.profile)) &&
-    boundedInteger(budget.plannedRoles, 0, 4) &&
-    boundedInteger(budget.usedRoles, 0, 4) &&
+    boundedInteger(budget.plannedRoles, 0, 8) &&
+    boundedInteger(budget.usedRoles, 0, 8) &&
     boundedInteger(budget.plannedTurns, 0, 32) &&
     boundedInteger(budget.usedTurns, 0, 32) &&
     boundedInteger(budget.contextChars, 0, 100_000) &&
     boundedInteger(budget.outputChars, 0, 100_000) &&
-    protocolArray(budget.skippedRoles, 4) &&
+    protocolArray(budget.skippedRoles, 8) &&
     budget.skippedRoles.every((role) => protocolString(role, 30))
   );
 }
@@ -590,7 +814,7 @@ export function isForgeEvent(value: unknown): value is ForgeEvent {
       );
     case "agent.delegation":
       return (
-        ["explorer", "implementer", "tester", "reviewer"].includes(
+        /^(?:explorer|architect|implementer|tester|reviewer|custom-[a-z0-9]+(?:-[a-z0-9]+){0,5})$/.test(
           String(candidate.role),
         ) &&
         ["completed", "failed", "skipped"].includes(String(candidate.status)) &&
@@ -598,9 +822,19 @@ export function isForgeEvent(value: unknown): value is ForgeEvent {
         Number.isSafeInteger(candidate.turns) &&
         candidate.turns >= 0 &&
         candidate.turns <= 100 &&
-        protocolString(candidate.text, 100_000) &&
+        (candidate.status !== "completed" ||
+          (validSpecialistArtifact(candidate.artifact) &&
+            ((String(candidate.role).startsWith("custom-") &&
+              candidate.artifact.kind === "custom" &&
+              candidate.artifact.roleId === candidate.role) ||
+              (!String(candidate.role).startsWith("custom-") &&
+                candidate.artifact.kind === candidate.role)))) &&
+        (candidate.text === undefined ||
+          protocolString(candidate.text, 2_000)) &&
         (candidate.error === undefined ||
           protocolString(candidate.error, 2_000)) &&
+        (candidate.parallelReadOnly === undefined ||
+          typeof candidate.parallelReadOnly === "boolean") &&
         (candidate.budget === undefined ||
           validDelegationBudget(candidate.budget))
       );
@@ -677,6 +911,34 @@ export function isForgeEvent(value: unknown): value is ForgeEvent {
         Number.isFinite(candidate.durationMs) &&
         candidate.durationMs >= 0 &&
         candidate.durationMs <= 120_000 &&
+        (candidate.milestoneId === undefined ||
+          protocolString(candidate.milestoneId, 100)) &&
+        (candidate.verificationKind === undefined ||
+          [
+            "focused-unit",
+            "typecheck",
+            "browser-smoke",
+            "syntax",
+            "broad",
+          ].includes(String(candidate.verificationKind))) &&
+        (candidate.failureKind === undefined ||
+          [
+            "syntax-error",
+            "provider-history",
+            "stale-patch",
+            "timeout",
+            "browser-regression",
+            "command-failure",
+          ].includes(String(candidate.failureKind))) &&
+        (candidate.recoveryStrategy === undefined ||
+          [
+            "repair-syntax-first",
+            "rebuild-provider-history",
+            "refresh-context-rebase",
+            "shorten-and-retry",
+            "isolate-browser-regression",
+            "change-focused-command",
+          ].includes(String(candidate.recoveryStrategy))) &&
         (candidate.error === undefined ||
           (!!candidate.error &&
             typeof candidate.error === "object" &&

@@ -238,6 +238,44 @@ test("TUI exposes approval details and specialist evidence", () => {
       status: "completed",
       turns: 1,
       text: "Review complete",
+      budget: {
+        profile: "quality",
+        plannedRoles: 6,
+        usedRoles: 1,
+        plannedTurns: 8,
+        usedTurns: 1,
+        contextChars: 100,
+        outputChars: 90,
+        skippedRoles: [],
+      },
+    }),
+  );
+  tui.handle(
+    event("agent.delegation", {
+      role: "custom-security-auditor",
+      status: "completed",
+      turns: 1,
+      artifact: {
+        version: 1,
+        kind: "custom",
+        roleId: "custom-security-auditor",
+        mission: "Review security boundaries",
+        findings: [],
+        evidence: [{ source: "context", detail: "bounded" }],
+        risks: [],
+        recommendedChecks: [],
+        unknowns: [],
+      },
+      budget: {
+        profile: "quality",
+        plannedRoles: 6,
+        usedRoles: 2,
+        plannedTurns: 8,
+        usedTurns: 2,
+        contextChars: 200,
+        outputChars: 180,
+        skippedRoles: [],
+      },
     }),
   );
   tui.showApproval(
@@ -254,5 +292,9 @@ test("TUI exposes approval details and specialist evidence", () => {
   input.emit("4");
   assert.match(output.text(), /reviewer:completed\/1t/);
   assert.match(output.text(), /process\.run/);
+  input.emit("5");
+  assert.match(output.text(), /Supervisor-created specialists/);
+  assert.match(output.text(), /custom-security-auditor/);
+  assert.match(output.text(), /Budget: 2\/6 roles/);
   tui.stop();
 });

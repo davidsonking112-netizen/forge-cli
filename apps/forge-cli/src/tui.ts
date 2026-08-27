@@ -12,7 +12,7 @@ import type {
 } from "../../../packages/protocol/src/index.js";
 
 export type TuiCommand = "cancel";
-export type TuiTab = "overview" | "plan" | "activity" | "evidence";
+export type TuiTab = "overview" | "plan" | "activity" | "evidence" | "agents";
 
 export interface TuiInput {
   isTTY?: boolean;
@@ -261,7 +261,7 @@ export class FullScreenTui {
       this.addActivity(
         time,
         "AGENT",
-        `${event.role}: ${event.status} (${event.turns} turn${event.turns === 1 ? "" : "s"})`,
+        `${event.role}: ${event.status} (${event.turns} turn${event.turns === 1 ? "" : "s"})${event.artifact ? ` — artifact ${event.artifact.kind}` : " — artifact missing"}${event.parallelReadOnly ? " [parallel read-only]" : ""}`,
         statusTone(event.status),
       );
     } else if (event.type === "agent.repair") {
@@ -359,6 +359,7 @@ export class FullScreenTui {
     else if (value.includes("2")) this.activeTab = "plan";
     else if (value.includes("3")) this.activeTab = "activity";
     else if (value.includes("4")) this.activeTab = "evidence";
+    else if (value.includes("5")) this.activeTab = "agents";
     else if (value.includes("\x1b[A") || value.toLowerCase().includes("k"))
       this.activityOffset = Math.min(
         this.activityOffset + 1,
@@ -370,13 +371,25 @@ export class FullScreenTui {
   }
 
   private nextTab(): void {
-    const tabs: TuiTab[] = ["overview", "plan", "activity", "evidence"];
+    const tabs: TuiTab[] = [
+      "overview",
+      "plan",
+      "activity",
+      "evidence",
+      "agents",
+    ];
     this.activeTab =
       tabs[(tabs.indexOf(this.activeTab) + 1) % tabs.length] ?? "overview";
   }
 
   private previousTab(): void {
-    const tabs: TuiTab[] = ["overview", "plan", "activity", "evidence"];
+    const tabs: TuiTab[] = [
+      "overview",
+      "plan",
+      "activity",
+      "evidence",
+      "agents",
+    ];
     this.activeTab =
       tabs[(tabs.indexOf(this.activeTab) + tabs.length - 1) % tabs.length] ??
       "overview";
@@ -469,7 +482,13 @@ export class FullScreenTui {
         `${ANSI.dim}${this.fit(`Dependency graph ${completed}/${this.executionGraph.steps.length}   Active ${this.executionGraph.activeStepId ?? "none"}   Status ${this.executionGraph.status}`, inner)}${ANSI.reset}`,
       );
     }
-    const tabs = ["1 Overview", "2 Plan", "3 Activity", "4 Evidence"]
+    const tabs = [
+      "1 Overview",
+      "2 Plan",
+      "3 Activity",
+      "4 Evidence",
+      "5 Agents",
+    ]
       .map((tab) =>
         tab.startsWith(
           this.activeTab === "overview"
@@ -478,7 +497,9 @@ export class FullScreenTui {
               ? "2"
               : this.activeTab === "activity"
                 ? "3"
-                : "4",
+                : this.activeTab === "evidence"
+                  ? "4"
+                  : "5",
         )
           ? `${ANSI.bold}${tab}${ANSI.reset}`
           : `${ANSI.dim}${tab}${ANSI.reset}`,
@@ -493,13 +514,14 @@ export class FullScreenTui {
     if (this.activeTab === "overview") this.drawOverview(inner, rows);
     else if (this.activeTab === "plan") this.drawPlan(inner, rows);
     else if (this.activeTab === "activity") this.drawActivity(inner, rows);
-    else this.drawEvidence(inner, rows);
+    else if (this.activeTab === "evidence") this.drawEvidence(inner, rows);
+    else this.drawAgents(inner, rows);
     this.writeLine(`${ANSI.dim}${"─".repeat(width)}${ANSI.reset}`);
     this.writeLine(
       `${this.tone(statusColor)}${this.fit(` ${this.summary}`, inner)}${ANSI.reset}`,
     );
     this.writeLine(
-      `${ANSI.dim}${this.fit("Keys: 1-4 tabs  Tab/Arrows navigate  j/k scroll activity  q/Ctrl-C cancel  --simple disables full-screen UI", inner)}${ANSI.reset}`,
+      `${ANSI.dim}${this.fit("Keys: 1-5 tabs  Tab/Arrows navigate  j/k scroll activity  q/Ctrl-C cancel  --simple disables full-screen UI", inner)}${ANSI.reset}`,
     );
   }
 
@@ -614,6 +636,50 @@ export class FullScreenTui {
       );
   }
 
+  private drawAgents(inner: number, rows: number): void {
+    this.writeLine(`${ANSI.bold}Supervisor-created specialists${ANSI.reset}`);
+    this.writeLine(
+      this.fit(
+        "Built-in roles remain available; task-specific roles are created by the supervisor, bounded, read-only, and artifact-validated.",
+        inner,
+      ),
+    );
+    this.writeLine("");
+    if (!this.delegations.length) {
+      this.writeLine("No specialist delegation events.");
+      return;
+    }
+    const visible = this.delegations.slice(-Math.max(1, rows - 16));
+    for (const entry of visible) {
+      const artifact = entry.artifact ? `${entry.artifact.kind}✓` : "artifact!";
+      const mode = entry.parallelReadOnly ? " parallel-read-only" : "";
+      this.writeLine(
+        this.fit(
+          `${entry.role}  ${entry.status.toUpperCase()}  ${entry.turns} turn${entry.turns === 1 ? "" : "s"}  ${artifact}${mode}`,
+          inner,
+        ),
+      );
+      if (entry.artifact && entry.artifact.kind === "custom")
+        this.writeLine(this.fit(`  mission: ${entry.artifact.mission}`, inner));
+    }
+    const budget = [...this.delegations]
+      .reverse()
+      .find((entry) => entry.budget)?.budget;
+    if (budget) {
+      this.writeLine("");
+      this.writeLine(
+        this.fit(
+          `Budget: ${budget.usedRoles}/${budget.plannedRoles} roles · ${budget.usedTurns}/${budget.plannedTurns} turns · ${budget.contextChars} context chars · ${budget.outputChars} output chars`,
+          inner,
+        ),
+      );
+      if (budget.skippedRoles.length)
+        this.writeLine(
+          this.fit(`Skipped: ${budget.skippedRoles.join(", ")}`, inner),
+        );
+    }
+  }
+
   private drawEvidence(inner: number, rows: number): void {
     if (this.executionGraph) {
       this.writeLine(`${ANSI.bold}Dependency graph${ANSI.reset}`);
@@ -688,7 +754,10 @@ export class FullScreenTui {
       this.fit(
         this.delegations.length
           ? this.delegations
-              .map((entry) => `${entry.role}:${entry.status}/${entry.turns}t`)
+              .map(
+                (entry) =>
+                  `${entry.role}:${entry.status}/${entry.turns}t/${entry.artifact ? `${entry.artifact.kind}✓` : "artifact!"}${entry.parallelReadOnly ? "∥" : ""}`,
+              )
               .join("   ")
           : "No specialist delegation events.",
         inner,

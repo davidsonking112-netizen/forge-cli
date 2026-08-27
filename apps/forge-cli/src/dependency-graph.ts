@@ -23,7 +23,7 @@ const MUTATION_TOOLS = new Set<ToolName>([
   "git.commit",
 ]);
 
-const VERIFY_TOOL: ToolName = "process.run";
+const VERIFY_TOOLS = new Set<ToolName>(["process.run", "browser.smoke"]);
 const MAX_STEPS = 64;
 
 function stableId(index: number, title: string): string {
@@ -155,8 +155,8 @@ export class DependencyGraph {
     return { ...event, sessionId };
   }
 
-  public actionGate(tool: ToolName): GraphGate {
-    if (!MUTATION_TOOLS.has(tool) && tool !== VERIFY_TOOL)
+  public actionGate(tool: ToolName, proposedPaths: string[] = []): GraphGate {
+    if (!MUTATION_TOOLS.has(tool) && !VERIFY_TOOLS.has(tool))
       return {
         ok: true,
         reason: "Read-only action does not require an active graph step.",
@@ -195,6 +195,25 @@ export class DependencyGraph {
         reason: `${step.id} is ${step.status}; repair its contract before running another action.`,
         stepId: step.id,
       };
+    if (
+      MUTATION_TOOLS.has(tool) &&
+      step.expectedFiles.length &&
+      proposedPaths.length
+    ) {
+      const outsideContract = proposedPaths.find((candidate) => {
+        const normalized = candidate.replaceAll("\\", "/").replace(/^\.\//, "");
+        return !step.expectedFiles.some((expected) => {
+          const bounded = expected.replaceAll("\\", "/").replace(/^\.\//, "");
+          return normalized === bounded || normalized.startsWith(`${bounded}/`);
+        });
+      });
+      if (outsideContract)
+        return {
+          ok: false,
+          reason: `${step.id} mutation path ${outsideContract} is outside the step expected-file contract.`,
+          stepId: step.id,
+        };
+    }
     if (!this.activeStepId) {
       this.activeStepId = step.id;
       step.status = "active";

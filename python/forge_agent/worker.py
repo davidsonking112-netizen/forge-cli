@@ -17,7 +17,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .horizon import LongHorizonBuffer
-from .orchestration import BoundedOrchestrator, ROLES
+from .orchestration import (
+    BoundedOrchestrator,
+    MAX_SPECIALISTS,
+    ROLES,
+    create_task_specific_roles,
+)
 from .providers import Provider, ToolCall, build_provider
 
 PROTOCOL_VERSION = 1
@@ -25,8 +30,8 @@ MAX_INPUT_LINE_BYTES = 1_000_000
 MAX_SESSION_ID_LENGTH = 100
 COST_PROFILES = {
     "economy": {"max_agents": 2, "max_total_turns": 4, "max_context_chars": 16_000, "max_output_chars": 6_000},
-    "balanced": {"max_agents": 4, "max_total_turns": 8, "max_context_chars": 24_000, "max_output_chars": 8_000},
-    "quality": {"max_agents": 4, "max_total_turns": 16, "max_context_chars": 40_000, "max_output_chars": 12_000},
+    "balanced": {"max_agents": 5, "max_total_turns": 8, "max_context_chars": 24_000, "max_output_chars": 8_000},
+    "quality": {"max_agents": 8, "max_total_turns": 16, "max_context_chars": 40_000, "max_output_chars": 12_000},
 }
 
 
@@ -43,6 +48,7 @@ TOOL_RISKS = {
     "workspace.apply_patch": "reversible-write",
     "workspace.apply_unified_diff": "reversible-write",
     "process.run": "local-execution",
+    "browser.smoke": "local-execution",
     "git.status": "read-only",
     "git.branch": "reversible-write",
     "git.stage": "reversible-write",
@@ -57,6 +63,7 @@ TOOL_SCHEMAS = [
     {"type": "function", "function": {"name": "workspace.apply_patch", "description": "Apply a complete replacement to one file after explicit user approval.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"], "additionalProperties": False}}},
     {"type": "function", "function": {"name": "workspace.apply_unified_diff", "description": "Apply validated unified-diff hunks after explicit user approval.", "parameters": {"type": "object", "properties": {"diff": {"type": "string"}}, "required": ["diff"], "additionalProperties": False}}},
     {"type": "function", "function": {"name": "process.run", "description": "Run a bounded local verification command after explicit user approval.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}, "timeoutMs": {"type": "integer", "minimum": 100, "maximum": 120000}}, "required": ["command"], "additionalProperties": False}}},
+    {"type": "function", "function": {"name": "browser.smoke", "description": "Run a bounded local static-server browser smoke check after explicit user approval.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": False}}},
     {"type": "function", "function": {"name": "git.status", "description": "Inspect Git status without changing it.", "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}},
     {"type": "function", "function": {"name": "git.branch", "description": "Create a local branch after approval.", "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"], "additionalProperties": False}}},
     {"type": "function", "function": {"name": "git.stage", "description": "Stage selected workspace paths after approval.", "parameters": {"type": "object", "properties": {"paths": {"type": "array", "items": {"type": "string"}}}, "required": ["paths"], "additionalProperties": False}}},
@@ -150,7 +157,7 @@ def tool_signature(call: ToolCall) -> str:
 def progress_step_for_tool(tool_name: str) -> str:
     if tool_name in {"workspace.apply_patch", "workspace.apply_unified_diff", "git.branch", "git.stage", "git.commit"}:
         return "change"
-    if tool_name == "process.run":
+    if tool_name in {"process.run", "browser.smoke"}:
         return "verify"
     if tool_name in TOOL_RISKS:
         return "inspect"
@@ -225,13 +232,20 @@ class MockAgent:
                 if os.environ.get("FORGE_MULTI_AGENT", "0") == "1":
                     profile_name = os.environ.get("FORGE_COST_PROFILE", "balanced").lower()
                     profile = COST_PROFILES.get(profile_name, COST_PROFILES["balanced"])
-                    requested_agents = bounded_int("FORGE_MAX_AGENTS", profile["max_agents"], 1, 4)
-                    roles = selected_roles(self.prompt, requested_agents)
+                    requested_agents = bounded_int("FORGE_MAX_AGENTS", profile["max_agents"], 1, MAX_SPECIALISTS)
+                    roles = selected_roles(self.prompt, min(requested_agents, len(ROLES)))
+                    dynamic_roles = create_task_specific_roles(
+                        self.prompt,
+                        max(0, requested_agents - len(roles)),
+                    )
+                    planned_role_names = [*roles, *(spec.role for spec in dynamic_roles)]
                     report = BoundedOrchestrator(
-                        max_agents=len(roles),
+                        max_agents=requested_agents,
                         max_total_turns=bounded_int("FORGE_MAX_TOTAL_TURNS", profile["max_total_turns"], 1, 16),
                         max_context_chars=bounded_int("FORGE_MAX_AGENT_CONTEXT_CHARS", profile["max_context_chars"], 4_000, 100_000),
                         max_output_chars=bounded_int("FORGE_MAX_AGENT_OUTPUT_CHARS", profile["max_output_chars"], 2_000, 20_000),
+                        parallel_read_only=os.environ.get("FORGE_PARALLEL_READONLY", "0") == "1",
+                        dynamic_roles=dynamic_roles,
                     ).run(provider=self.provider, goal=self.prompt, context=context_summary)
                     used_roles = sum(1 for result in report.results if result.turns > 0)
                     used_turns = sum(result.turns for result in report.results)
@@ -239,7 +253,7 @@ class MockAgent:
                     selected = {result.role for result in report.results}
                     skipped = [
                         f"{role}: cost/risk scope"
-                        for role in ROLES
+                        for role in planned_role_names
                         if role not in selected
                     ]
                     skipped.extend(
@@ -247,10 +261,12 @@ class MockAgent:
                         for result in report.results
                         if result.status == "skipped"
                     )
-                    budget = {"profile": profile_name if profile_name in COST_PROFILES else "balanced", "plannedRoles": len(roles), "usedRoles": used_roles, "plannedTurns": bounded_int("FORGE_MAX_TOTAL_TURNS", profile["max_total_turns"], 1, 16), "usedTurns": used_turns, "contextChars": min(len(context_summary), bounded_int("FORGE_MAX_AGENT_CONTEXT_CHARS", profile["max_context_chars"], 4_000, 100_000)), "outputChars": output_chars, "skippedRoles": skipped}
+                    budget = {"profile": profile_name if profile_name in COST_PROFILES else "balanced", "plannedRoles": len(planned_role_names), "usedRoles": used_roles, "plannedTurns": bounded_int("FORGE_MAX_TOTAL_TURNS", profile["max_total_turns"], 1, 16), "usedTurns": used_turns, "contextChars": min(len(context_summary), bounded_int("FORGE_MAX_AGENT_CONTEXT_CHARS", profile["max_context_chars"], 4_000, 100_000)), "outputChars": output_chars, "skippedRoles": skipped}
                     responses = [event("agent.checklist", self.session_id, items=task_checklist("plan", completed={"inspect"}))]
                     for result in report.results:
-                        delegation_payload = {"role": result.role, "status": result.status, "turns": result.turns, "text": result.text, "budget": budget}
+                        delegation_payload = {"role": result.role, "status": result.status, "turns": result.turns, "text": result.text, "budget": budget, "parallelReadOnly": report.parallelReadOnly}
+                        if result.artifact is not None:
+                            delegation_payload["artifact"] = result.artifact
                         if result.error is not None:
                             delegation_payload["error"] = result.error
                         responses.append(event("agent.delegation", self.session_id, **delegation_payload))
@@ -509,9 +525,14 @@ class MockAgent:
         if tool == "workspace.read" and self.stage == "plan":
             self.steps[1]["status"] = "complete"
             if self.desired_path:
+                mock_content = (
+                    "globalThis.__forgeMock = true;\n"
+                    if self.desired_path.lower().endswith((".js", ".mjs", ".cjs"))
+                    else "Created by Forge v0.1 mock agent.\n"
+                )
                 self.stage = "change"
                 self.steps[2]["status"] = "active"
-                return [event("agent.text", self.session_id, text=f"I found enough context to propose creating {self.desired_path}. Forge will show the patch and request approval before writing."), event("agent.checklist", self.session_id, items=task_checklist("approve", completed={"inspect", "plan"})), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "active"}, {"key": "current-step", "value": "Awaiting approval for the proposed change", "status": "active"}, {"key": "inspection", "value": "Relevant context reviewed", "status": "done"}, {"key": "change", "value": f"Create {self.desired_path}", "status": "active"}, {"key": "verification", "value": "Pending approved change", "status": "todo"}]), event("tool.proposal", self.session_id, tool="workspace.apply_patch", risk="reversible-write", arguments={"path": self.desired_path, "content": "Created by Forge v0.1 mock agent.\n"}, reason="Apply the minimal file change requested by the user.")]
+                return [event("agent.text", self.session_id, text=f"I found enough context to propose creating {self.desired_path}. Forge will show the patch and request approval before writing."), event("agent.checklist", self.session_id, items=task_checklist("approve", completed={"inspect", "plan"})), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "active"}, {"key": "current-step", "value": "Awaiting approval for the proposed change", "status": "active"}, {"key": "inspection", "value": "Relevant context reviewed", "status": "done"}, {"key": "change", "value": f"Create {self.desired_path}", "status": "active"}, {"key": "verification", "value": "Pending approved change", "status": "todo"}]), event("tool.proposal", self.session_id, tool="workspace.apply_patch", risk="reversible-write", arguments={"path": self.desired_path, "content": mock_content}, reason="Apply the minimal file change requested by the user.")]
             self.stage = "complete"
             self.steps[2]["status"] = "complete"
             self.steps[3]["status"] = "complete"

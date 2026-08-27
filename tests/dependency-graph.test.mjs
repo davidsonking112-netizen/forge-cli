@@ -107,6 +107,17 @@ test("graph advancement makes only dependency-ready steps active", () => {
   assert.equal(graph.gateForStep(graph.snapshot()[2].id).ok, true);
 });
 
+test("mutation proposals must stay within the active milestone expected files", () => {
+  const graph = new DependencyGraph(plan([graphStep("Domain model")]));
+  const blocked = graph.actionGate("workspace.apply_patch", ["ui.js"]);
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.reason, /outside.*expected-file/i);
+  const allowed = graph.actionGate("workspace.apply_patch", [
+    "domain-model.js",
+  ]);
+  assert.equal(allowed.ok, true);
+});
+
 test("cyclic dependencies are rejected as an invalid graph", () => {
   const graph = new DependencyGraph(
     plan([graphStep("A", [1]), graphStep("B", [0])]),
@@ -134,4 +145,20 @@ test("legacy plan steps receive sequential dependencies for safe fallback behavi
   assert.equal(graph.proposedByModel(), false);
   assert.deepEqual(steps[0].dependencies, []);
   assert.deepEqual(steps[1].dependencies, [steps[0].id]);
+});
+
+test("browser smoke is gated by the active dependency checkpoint", () => {
+  const graph = new DependencyGraph(
+    plan([graphStep("UI"), graphStep("Browser behavior", [0])]),
+  );
+  const gate = graph.actionGate("browser.smoke");
+  assert.equal(gate.ok, true);
+  assert.equal(gate.stepId, graph.snapshot()[0].id);
+  const repeated = graph.actionGate("browser.smoke");
+  assert.equal(repeated.ok, true);
+  const completed = graph.markStepCompleted(gate.stepId);
+  assert.equal(completed?.steps[0].status, "completed");
+  const downstream = graph.actionGate("browser.smoke");
+  assert.equal(downstream.ok, true);
+  assert.equal(downstream.stepId, graph.snapshot()[1].id);
 });
