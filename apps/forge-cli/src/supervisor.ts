@@ -42,7 +42,7 @@ import {
   type MilestoneVerificationPlan,
 } from "./verification.js";
 
-const FORGE_VERSION = "0.9.9";
+const FORGE_VERSION = "0.9.10";
 
 export interface RunOptions {
   prompt: string;

@@ -1,6 +1,6 @@
 {
   "name": "forge-cli-workspace",
-  "version": "0.9.9",
+  "version": "0.9.10",
   "private": true,
   "description": "Forge CLI development workspace and installable GitHub package",
   "bin": {

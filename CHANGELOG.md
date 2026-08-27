@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.10 — 2026-08-27
+
+Windows refresh reliability now uses a version bump so local global npm installations cannot silently remain on the previous Forge build. Missing Git is reported as an unavailable optional capability instead of failing a provider session, and provider-backed sessions enforce a bounded read-only inspection budget before requesting an evidence summary.
+
 ## Unreleased — supervisor-created specialists and Agents TUI
 
 Forge now retains the five built-in typed specialist roles while allowing the supervisor to create up to three additional task-specific, read-only specialists from bounded templates. Security, dependency, accessibility, UX/browser, backend, data-integrity, performance, release, and complex integration signals can select custom roles. Dynamic artifacts are strictly validated, role IDs are bounded, specialists receive no tools, and the total delegated-agent ceiling is eight.

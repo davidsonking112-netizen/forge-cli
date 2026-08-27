@@ -47,7 +47,7 @@ import {
   readRepositoryIndex,
 } from "./index.js";
 
-const VERSION = "0.9.9";
+const VERSION = "0.9.10";
 
 function usage(): string {
   return `Forge CLI v${VERSION}
