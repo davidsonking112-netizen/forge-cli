@@ -273,7 +273,7 @@ class MockAgent:
             if self._requires_mutation() and not self._has_progress_evidence():
                 return responses + [event("session.complete", self.session_id, status="failed", summary="The provider returned text without applying or verifying the requested implementation after bounded continuation attempts.", changedFiles=self.changed_files, checks=self.verification_checks)]
             return responses + [event("session.complete", self.session_id, status="completed", summary="The provider completed with a text response and did not request a tool.", changedFiles=self.changed_files, checks=self.verification_checks)]
-        return responses + [event("session.complete", self.session_id, status="completed", summary="The provider completed without requesting another tool.", changedFiles=self.changed_files, checks=self.verification_checks)]
+        return responses + [event("session.complete", self.session_id, status="failed", summary="The provider returned no text and requested no tool; Forge cannot claim that the task completed.", changedFiles=self.changed_files, checks=self.verification_checks)]
 
     def _requires_mutation(self) -> bool:
         return high_risk_goal(self.prompt) and not bool(re.search(r"\b(do not|don't|without)\s+(modify|change|write|edit|run|execute)", self.prompt, re.IGNORECASE))
@@ -358,9 +358,10 @@ class MockAgent:
             path = output.get("path")
             if isinstance(path, str) and path not in self.changed_files:
                 self.changed_files.append(path)
-            changed = output.get("changedFiles")
-            if isinstance(changed, list):
-                self.changed_files.extend(item for item in changed if isinstance(item, str) and item not in self.changed_files)
+            for key in ("files", "changedFiles"):
+                changed = output.get(key)
+                if isinstance(changed, list):
+                    self.changed_files.extend(item for item in changed if isinstance(item, str) and item not in self.changed_files)
         if current_call.name in {"workspace.list", "workspace.search", "workspace.read", "workspace.diff", "git.status"} and payload.get("approved", False) and payload.get("ok"):
 
             self.tool_result_cache[tool_signature(current_call)] = {"content": result_content, "ok": bool(payload.get("ok"))}

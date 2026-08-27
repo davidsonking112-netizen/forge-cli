@@ -228,6 +228,45 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(completion["status"], "failed")
         self.assertIn("repeated", completion["summary"])
 
+    def test_provider_reports_patch_executor_files(self):
+        class SummaryProvider:
+            def complete(self, *, messages, tools, on_text=None):
+                del messages, tools, on_text
+                return ProviderReply(text="The patch is complete.")
+
+        agent = MockAgent("changed-files")
+        agent.provider = SummaryProvider()
+        agent.prompt = "Create a CRM feature."
+        agent.horizon = LongHorizonBuffer(max_chars=10_000, max_messages=32)
+        agent.pending_call = ToolCall("patch-1", "workspace.apply_patch", {"path": "app.js", "content": "safe"})
+        agent.pending_calls = [agent.pending_call]
+        events = agent.on_provider_tool_result({
+            "tool": "workspace.apply_patch",
+            "ok": True,
+            "approved": True,
+            "output": {"files": ["app.js"], "checkpoint": "00000000-0000-0000-0000-000000000000"},
+        })
+
+        completion = next(item for item in events if item.get("type") == "session.complete")
+        self.assertEqual(completion["status"], "completed")
+        self.assertEqual(completion["changedFiles"], ["app.js"])
+
+    def test_empty_provider_reply_fails_closed(self):
+        class EmptyProvider:
+            def complete(self, *, messages, tools, on_text=None):
+                del messages, tools, on_text
+                return ProviderReply()
+
+        agent = MockAgent("empty-provider")
+        agent.provider = EmptyProvider()
+        agent.prompt = "Create a CRM feature."
+        agent.horizon = LongHorizonBuffer(max_chars=10_000, max_messages=32)
+        events = agent.provider_turn()
+
+        completion = next(item for item in events if item.get("type") == "session.complete")
+        self.assertEqual(completion["status"], "failed")
+        self.assertIn("no text", completion["summary"])
+
     def test_provider_recovers_bounded_text_only_implementation_responses(self):
         class TextOnlyProvider:
             def __init__(self):
