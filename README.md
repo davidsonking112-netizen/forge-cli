@@ -63,11 +63,21 @@ Run the deterministic plan flow:
 node dist/apps/forge-cli/src/main.js plan "Explain this repository"
 ```
 
-Start an interactive session:
+Start an interactive session. When Forge is attached to a TTY, it opens a full-screen terminal workspace by default:
 
 ```bash
 node dist/apps/forge-cli/src/main.js
 ```
+
+The full-screen UI shows the current session status, workspace/provider/policy, checklist progress, live activity, plan, scratchpad, tool results, specialist activity, verification evidence, and pending approvals. Use `1`–`4` to switch between Overview, Plan, Activity, and Evidence; `Tab` or left/right arrows to move between tabs; `j`/`k` or up/down arrows to scroll activity; and `q` or `Ctrl-C` to request cancellation. Approval prompts remain explicit and are handled through the normal readline approval flow; the TUI cannot approve an action by itself. The alternate screen and raw keyboard mode are restored when the session exits.
+
+Use the line renderer when terminal interaction is unavailable or when plain output is preferred:
+
+```bash
+node dist/apps/forge-cli/src/main.js --simple
+```
+
+`--output json` remains machine-readable JSONL and never activates the full-screen renderer.
 
 Use the offline mock provider by default, or configure an OpenAI-compatible provider:
 

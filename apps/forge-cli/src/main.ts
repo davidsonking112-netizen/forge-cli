@@ -2224,8 +2224,7 @@ async function runTask(
     args.command === "plan"
       ? args.positional.join(" ")
       : flagString(args.flags, "prompt", args.positional.join(" "));
-  const interactive =
-    !isJson && args.command === "interactive" && Boolean(input.isTTY);
+  const interactive = !isJson && Boolean(input.isTTY);
   const rl = interactive ? createInterface({ input, output }) : undefined;
   const cancellation = new AbortController();
   let interrupted = false;
@@ -2236,7 +2235,17 @@ async function runTask(
   };
   process.once("SIGINT", onSigint);
   const tui =
-    interactive && args.flags.simple !== true ? new FullScreenTui() : undefined;
+    interactive && args.flags.simple !== true
+      ? new FullScreenTui({
+          onCommand: (command) => {
+            if (command === "cancel") {
+              interrupted = true;
+              cancellation.abort();
+              rl?.close();
+            }
+          },
+        })
+      : undefined;
   const cleanupCancellation = (): void => {
     process.removeListener("SIGINT", onSigint);
     rl?.close();
@@ -2244,8 +2253,14 @@ async function runTask(
   };
   if (tui) tui.start();
   try {
-    if (!prompt && interactive && rl)
-      prompt = (await rl.question("What should Forge do? ")).trim();
+    if (!prompt && interactive && rl) {
+      tui?.setInputSuspended(true);
+      try {
+        prompt = (await rl.question("What should Forge do? ")).trim();
+      } finally {
+        tui?.setInputSuspended(false);
+      }
+    }
     if (!prompt) {
       console.error(
         args.command === "plan"
@@ -2269,13 +2284,20 @@ async function runTask(
           proposal: ToolProposalEvent,
         ): Promise<"approve-once" | "approve-session" | "deny" | "cancel"> => {
           tui?.showApproval(proposal);
-          const answer = (
-            await rl.question(
-              `Approve ${proposal.tool}? [y]es/[s]ession/[n]o/[r]evoke/[c]ancel: `,
+          tui?.setInputSuspended(true);
+          let answer: string;
+          try {
+            answer = (
+              await rl.question(
+                `Approve ${proposal.tool}? [y]es/[s]ession/[n]o/[r]evoke/[c]ancel: `,
+              )
             )
-          )
-            .trim()
-            .toLowerCase();
+              .trim()
+              .toLowerCase();
+          } finally {
+            tui?.setInputSuspended(false);
+            tui?.setApprovalActive(false);
+          }
           if (answer === "y" || answer === "yes") return "approve-once";
           if (answer === "s" || answer === "session") return "approve-session";
           if (answer === "r" || answer === "revoke") {
