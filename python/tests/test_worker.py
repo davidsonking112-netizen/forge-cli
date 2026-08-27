@@ -384,6 +384,50 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(provider.base_url, "https://proxy.invalid")
         self.assertEqual(provider.model, "custom/model")
 
+    def test_provider_is_prompted_to_summarize_after_bounded_read_only_inspection(self):
+        class ReadLoopProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, *, messages, tools, on_text=None):
+                del messages, tools, on_text
+                self.calls += 1
+                if self.calls <= 2:
+                    return ProviderReply(
+                        tool_calls=(
+                            ToolCall(
+                                f"read-{self.calls}",
+                                "workspace.read",
+                                {"path": f"file-{self.calls}.txt"},
+                            ),
+                        )
+                    )
+                return ProviderReply(text="Bounded evidence summary.")
+
+        provider = ReadLoopProvider()
+        agent = MockAgent("bounded-read-loop")
+        agent.provider = provider
+        agent.prompt = "Inspect this repository."
+        agent.horizon = LongHorizonBuffer(max_chars=10_000, max_messages=32)
+        agent.read_only_limit = 2
+        events = agent.provider_turn()
+        for index in range(1, 3):
+            events.extend(
+                agent.on_provider_tool_result(
+                    {
+                        "tool": "workspace.read",
+                        "ok": True,
+                        "approved": True,
+                        "output": {"path": f"file-{index}.txt", "content": "evidence"},
+                    }
+                )
+            )
+
+        completion = next(item for item in events if item.get("type") == "session.complete")
+        self.assertEqual(provider.calls, 3)
+        self.assertEqual(completion["status"], "completed")
+        self.assertTrue(any("read-only inspection budget" in item.get("content", "").lower() for item in agent.messages if item.get("role") == "user"))
+
     def test_provider_token_parameter_and_headers_are_bounded(self):
         class Response:
             def __enter__(self):

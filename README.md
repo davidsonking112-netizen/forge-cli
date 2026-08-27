@@ -38,12 +38,14 @@ Remove-Item $zip -Force
 Set-Location (Join-Path $root "forge-cli-main")
 npm ci
 npm run build
+# Install the local package into npm's user-level global prefix; admin rights are not required.
+npm install --global .
 $env:FORGE_PYTHON = "python"
-node .\dist\apps\forge-cli\src\main.js init --workspace .
-node .\dist\apps\forge-cli\src\main.js status --workspace .
+forge init --workspace .
+forge status --workspace .
 ```
 
-For a local source checkout, invoke `node .\dist\apps\forge-cli\src\main.js` directly. Do not append `--workspace .` to `npm run forge -- ...`; npm interprets `--workspace` as an npm workspace selector rather than forwarding it to Forge.
+For a local source checkout, `npm install --global .` creates the `forge` command in npm’s user-level global bin directory. If you do not want a global install, invoke `node .\dist\apps\forge-cli\src\main.js` directly. Do not append `--workspace .` to `npm run forge -- ...`; npm interprets `--workspace` as an npm workspace selector rather than forwarding it to Forge. If PowerShell still cannot find `forge` after installation, open a new PowerShell window so the npm global bin directory is refreshed in `PATH`.
 
 The GitHub source package is currently a development/release-candidate package rather than a registry-published `1.0.0` package. It still requires Node.js 22+ and Python 3.11+. API credentials remain environment-only; npm does not receive or store provider secrets. When a final registry package is approved, the package name, version, lockfile, and cross-platform distribution checks should be finalized before publishing.
 
@@ -118,7 +120,7 @@ For Requesty on Windows PowerShell:
 $env:FORGE_PROVIDER = "requesty"
 $env:REQUESTY_API_KEY = "your-requesty-key"
 $env:FORGE_MODEL = "openai/gpt-4o-mini"
-forge run --prompt "Review this repository and propose safe improvements"
+forge run --simple --prompt "Review this repository and propose safe improvements"
 ```
 
 Forge reads the Requesty key only from the environment; do not commit it to a repository or place it in a prompt, config file, or command argument.

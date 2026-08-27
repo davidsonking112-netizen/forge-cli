@@ -341,12 +341,27 @@ export class WorkspaceTools {
             output: await this.runGit(["diff", "--no-ext-diff", "--", "."]),
             durationMs: Date.now() - started,
           };
-        case "git.status":
-          return {
-            ok: true,
-            output: await this.runGit(["status", "--short", "--branch"]),
-            durationMs: Date.now() - started,
-          };
+        case "git.status": {
+          try {
+            return {
+              ok: true,
+              output: await this.runGit(["status", "--short", "--branch"]),
+              durationMs: Date.now() - started,
+            };
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            return {
+              ok: true,
+              output: {
+                command: "git status --short --branch",
+                unavailable: true,
+                reason:
+                  "Git is not installed or is not available on PATH; Git-dependent workflows remain unavailable.",
+              },
+              durationMs: Date.now() - started,
+            };
+          }
+        }
         case "git.branch": {
           const name = String(request.arguments.name ?? "");
           if (

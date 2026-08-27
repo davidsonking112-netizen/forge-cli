@@ -96,6 +96,25 @@ test("process failures and timeouts become bounded tool failures", async () => {
   }
 });
 
+test("missing Git is reported as an unavailable optional capability", async () => {
+  const root = await fixture();
+  const previousPath = process.env.PATH;
+  process.env.PATH = path.join(root, "missing-bin");
+  try {
+    const result = await new WorkspaceTools(root).execute({
+      tool: "git.status",
+      arguments: {},
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.output?.unavailable, true);
+    assert.match(result.output?.reason ?? "", /Git is not installed/i);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("workspace locks reject active contention and release cleanly", async () => {
   const state = await mkdtemp(path.join(os.tmpdir(), "forge-lock-state-"));
   const previous = process.env.XDG_STATE_HOME;
