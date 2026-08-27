@@ -1573,6 +1573,12 @@ test("supervisor rejects premature mutation completion and continues to verified
     });
     assert.equal(result.status, "completed");
     assert.deepEqual(result.changedFiles, ["gate.txt"]);
+    const graphEvents = events.filter((event) => event.type === "agent.graph");
+    assert.ok(graphEvents.length >= 3);
+    assert.match(graphEvents[0].steps[0].id, /^step-01-/);
+    assert.equal(graphEvents[0].steps[0].contractValid, true);
+    assert.equal(graphEvents.at(-1)?.status, "completed");
+    assert.equal(graphEvents.at(-1)?.steps[0].status, "completed");
     assert.ok(
       events.some(
         (event) => event.type === "agent.state" && event.status === "blocked",
@@ -1623,5 +1629,92 @@ test("supervisor fails closed after bounded completion-gate rejection attempts",
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("protocol validates dependency graph checkpoints and rejects malformed contracts", () => {
+  const step = {
+    id: "step-01-domain-a1b2c3d4",
+    sourceId: "proposal-1",
+    index: 0,
+    title: "Domain model",
+    description: "Build the domain model",
+    expectedFiles: ["domain.js"],
+    dependencies: [],
+    risks: ["schema drift"],
+    tests: ["node --check domain.js"],
+    postconditions: ["domain loads"],
+    status: "ready",
+    contractValid: true,
+    contractErrors: [],
+  };
+  const graph = {
+    ...createEnvelope("agent.graph", "session-graph"),
+    type: "agent.graph",
+    version: 1,
+    status: "validated",
+    planArtifactId: "plan-1234567890abcdef",
+    steps: [step],
+    note: "Graph validated",
+  };
+  assert.equal(isForgeEvent(graph), true);
+  assert.deepEqual(parseForgeEvent(JSON.stringify(graph)), graph);
+  assert.throws(
+    () =>
+      parseForgeEvent(
+        JSON.stringify({ ...graph, steps: [{ ...step, tests: [] }] }),
+      ),
+    /invalid/i,
+  );
+  assert.throws(
+    () => parseForgeEvent(JSON.stringify({ ...graph, status: "running" })),
+    /invalid/i,
+  );
+});
+
+test("dependency graph persists and is exposed by forge inspect", async () => {
+  const workspace = await tempWorkspace();
+  const stateHome = await mkdtemp(path.join(os.tmpdir(), "forge-graph-state-"));
+  const sessionDirectory = path.join(stateHome, "forge", "sessions");
+  try {
+    const result = await new ForgeSupervisor(
+      new SessionStore(sessionDirectory),
+    ).run({
+      prompt: "Create file graph-persist.txt",
+      workspace,
+      approveAll: true,
+      record: true,
+    });
+    assert.equal(result.status, "completed");
+    const record = await new SessionStore(sessionDirectory).read(
+      result.sessionId,
+    );
+    assert.equal(record.executionGraph?.status, "completed");
+    assert.match(record.executionGraph?.steps[0]?.id ?? "", /^step-01-/);
+    const inspect = spawnSync(
+      process.execPath,
+      [
+        path.resolve("dist/apps/forge-cli/src/main.js"),
+        "inspect",
+        result.sessionId,
+        "--output",
+        "json",
+      ],
+      {
+        encoding: "utf8",
+        timeout: 5_000,
+        env: { ...process.env, XDG_STATE_HOME: stateHome },
+      },
+    );
+    assert.equal(inspect.status, 0);
+    const inspected = JSON.parse(inspect.stdout);
+    assert.equal(inspected.executionGraph.status, "completed");
+    assert.equal(
+      inspected.executionGraph.steps[0].id,
+      record.executionGraph.steps[0].id,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+    await rm(stateHome, { recursive: true, force: true });
   }
 });

@@ -11,7 +11,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from forge_agent.horizon import LongHorizonBuffer
 from forge_agent.orchestration import BoundedOrchestrator
 from forge_agent.providers import MockProvider, OpenAICompatibleProvider, ProviderReply, ToolCall, build_provider, redact
-from forge_agent.worker import MockAgent, main, protocol_json, redact_error, sanitize_surrogates, selected_roles, verification_check
+from forge_agent.worker import MockAgent, extract_graph_proposal, main, protocol_json, redact_error, sanitize_surrogates, selected_roles, verification_check
 
 
 class WorkerTests(unittest.TestCase):
@@ -627,9 +627,13 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(event["error"]["code"], "WORKER_PROTOCOL_ERROR")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
+    def test_extract_graph_proposal_requires_marker_and_bounds_fields(self):
+        self.assertIsNone(extract_graph_proposal('{"steps": []}'))
+        proposal = extract_graph_proposal('FORGE_GRAPH: {"steps": [{"title": "Domain", "description": "Build the model", "expectedFiles": ["domain.js"], "dependsOn": [], "risks": ["schema drift"], "tests": ["node --check domain.js"], "postconditions": ["model loads"]}]}')
+        self.assertEqual(proposal[0]["title"], "Domain")
+        self.assertEqual(proposal[0]["expectedFiles"], ["domain.js"])
+        self.assertEqual(proposal[0]["dependsOn"], [])
+        self.assertEqual(extract_graph_proposal("FORGE_GRAPH: {\"steps\": [{\"title\": \"Missing contract\"}]}")[0]["tests"], [])
 
     def test_continue_provider_preserves_active_stage_after_gate_feedback(self):
         agent = MockAgent("session-gate")
@@ -643,3 +647,7 @@ if __name__ == "__main__":
         self.assertIn("rejected", agent.messages[-1]["content"])
         self.assertEqual(responses[1]["type"], "tool.proposal")
         self.assertEqual(responses[1]["tool"], "process.run")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,6 +1,7 @@
 import type {
   AgentChecklistEvent,
   AgentDelegationEvent,
+  AgentGraphEvent,
   AgentPlanEvent,
   AgentRepairEvent,
   AgentScratchpadEvent,
@@ -97,6 +98,7 @@ export class FullScreenTui {
   private delegations: AgentDelegationEvent[] = [];
   private checks: SessionCompleteEvent["checks"] = [];
   private executionState: AgentStateEvent | undefined;
+  private executionGraph: AgentGraphEvent | undefined;
   private sessionId = "";
   private workspace = "";
   private provider = "";
@@ -206,6 +208,17 @@ export class FullScreenTui {
         time,
         "STATE",
         `${event.phase} / ${event.artifact}: ${event.note}`,
+        statusTone(event.status),
+      );
+    } else if (event.type === "agent.graph") {
+      this.executionGraph = event;
+      const completed = event.steps.filter(
+        (step) => step.status === "completed",
+      ).length;
+      this.addActivity(
+        time,
+        "GRAPH",
+        `${completed}/${event.steps.length} steps complete; active ${event.activeStepId ?? "none"}`,
         statusTone(event.status),
       );
     } else if (event.type === "agent.delegation") {
@@ -416,6 +429,14 @@ export class FullScreenTui {
     this.writeLine(
       `${ANSI.dim}${this.fit(`Execution phase ${this.executionState?.phase || "intake"}   Artifact ${this.executionState?.artifact || "task-contract"}   Budget ${this.executionState ? `${this.executionState.budget.providerTurns}/${this.executionState.budget.maxProviderTurns} turns, ${this.executionState.budget.toolCalls}/${this.executionState.budget.maxToolCalls} tools` : "initializing"}`, inner)}${ANSI.reset}`,
     );
+    if (this.executionGraph) {
+      const completed = this.executionGraph.steps.filter(
+        (step) => step.status === "completed",
+      ).length;
+      this.writeLine(
+        `${ANSI.dim}${this.fit(`Dependency graph ${completed}/${this.executionGraph.steps.length}   Active ${this.executionGraph.activeStepId ?? "none"}   Status ${this.executionGraph.status}`, inner)}${ANSI.reset}`,
+      );
+    }
     const tabs = ["1 Overview", "2 Plan", "3 Activity", "4 Evidence"]
       .map((tab) =>
         tab.startsWith(
@@ -559,6 +580,45 @@ export class FullScreenTui {
   }
 
   private drawEvidence(inner: number, rows: number): void {
+    if (this.executionGraph) {
+      this.writeLine(`${ANSI.bold}Dependency graph${ANSI.reset}`);
+      for (const step of this.executionGraph.steps.slice(
+        0,
+        Math.max(1, Math.floor((rows - 18) / 4)),
+      )) {
+        const marker =
+          step.status === "completed"
+            ? "✓"
+            : step.status === "active"
+              ? "→"
+              : step.status === "blocked" || step.status === "failed"
+                ? "!"
+                : "-";
+        this.writeLine(
+          this.fit(
+            `${marker} ${step.id} [${step.status}] deps=${step.dependencies.join(",") || "none"}`,
+            inner,
+          ),
+        );
+        this.writeLine(
+          this.fit(
+            `  files=${step.expectedFiles.join(", ") || "unspecified"} risks=${step.risks.join("; ") || "unspecified"}`,
+            inner,
+          ),
+        );
+        this.writeLine(
+          this.fit(
+            `  tests=${step.tests.join("; ") || "missing"} post=${step.postconditions.join("; ") || "missing"}`,
+            inner,
+          ),
+        );
+        if (step.contractErrors.length)
+          this.writeLine(
+            this.fit(`  contract: ${step.contractErrors.join("; ")}`, inner),
+          );
+      }
+      this.writeLine("");
+    }
     if (this.executionState) {
       this.writeLine(
         `${ANSI.bold}Enforced execution state${ANSI.reset}: ${this.executionState.phase} / ${this.executionState.status}`,

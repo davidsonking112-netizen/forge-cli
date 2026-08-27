@@ -125,12 +125,23 @@ export interface AgentRepairEvent extends BaseEvent {
   reason: string;
 }
 
+export interface PlanGraphProposalStep {
+  title: string;
+  description: string;
+  expectedFiles: string[];
+  dependsOn: number[];
+  risks: string[];
+  tests: string[];
+  postconditions: string[];
+}
+
 export interface AgentPlanEvent extends BaseEvent {
   type: "agent.plan";
   goal: string;
   steps: PlanStep[];
   assumptions: string[];
   verification: string[];
+  graph?: PlanGraphProposalStep[];
 }
 
 export type ExecutionPhase =
@@ -172,6 +183,37 @@ export interface AgentStateEvent extends BaseEvent {
   failureTransition: string;
   note: string;
   budget: AgentStateBudget;
+}
+
+export type DependencyGraphStatus =
+  "proposed" | "validated" | "in-progress" | "blocked" | "completed" | "failed";
+export type DependencyGraphStepStatus =
+  "pending" | "ready" | "active" | "completed" | "blocked" | "failed";
+
+export interface DependencyGraphStep {
+  id: string;
+  sourceId: string;
+  index: number;
+  title: string;
+  description: string;
+  expectedFiles: string[];
+  dependencies: string[];
+  risks: string[];
+  tests: string[];
+  postconditions: string[];
+  status: DependencyGraphStepStatus;
+  contractValid: boolean;
+  contractErrors: string[];
+}
+
+export interface AgentGraphEvent extends BaseEvent {
+  type: "agent.graph";
+  version: 1;
+  status: DependencyGraphStatus;
+  planArtifactId: string;
+  activeStepId?: string;
+  steps: DependencyGraphStep[];
+  note: string;
 }
 
 export interface PlanStep {
@@ -265,6 +307,7 @@ export type ForgeEvent =
   | AgentRepairEvent
   | AgentPlanEvent
   | AgentStateEvent
+  | AgentGraphEvent
   | ToolProposalEvent
   | ToolResultEvent
   | ApprovalResultEvent
@@ -346,6 +389,67 @@ function validExecutionBudget(value: unknown): boolean {
     boundedInteger(budget.maxToolCalls, 1, 256) &&
     boundedInteger(budget.repairAttempts, 0, 4) &&
     boundedInteger(budget.maxRepairAttempts, 1, 4)
+  );
+}
+
+function validGraphProposalStep(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const step = value as Record<string, unknown>;
+  const boundedStringList = (
+    candidate: unknown,
+    maxItems: number,
+    maxLength: number,
+  ): boolean =>
+    protocolArray(candidate, maxItems) &&
+    candidate.every((item) => protocolString(item, maxLength));
+  return (
+    protocolString(step.title, 200) &&
+    step.title.trim().length > 0 &&
+    protocolString(step.description, 2_000) &&
+    step.description.trim().length > 0 &&
+    boundedStringList(step.expectedFiles, 64, 500) &&
+    protocolArray(step.dependsOn, 64) &&
+    step.dependsOn.every((index) => boundedInteger(index, 0, 63)) &&
+    boundedStringList(step.risks, 16, 500) &&
+    boundedStringList(step.tests, 32, 500) &&
+    Array.isArray(step.tests) &&
+    step.tests.length > 0 &&
+    boundedStringList(step.postconditions, 16, 1_000) &&
+    Array.isArray(step.postconditions) &&
+    step.postconditions.length > 0
+  );
+}
+
+function validDependencyGraphStep(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const step = value as Record<string, unknown>;
+  const boundedStringList = (
+    candidate: unknown,
+    maxItems: number,
+    maxLength: number,
+  ): boolean =>
+    protocolArray(candidate, maxItems) &&
+    candidate.every((item) => protocolString(item, maxLength));
+  return (
+    protocolString(step.id, 100) &&
+    protocolString(step.sourceId, 100) &&
+    boundedInteger(step.index, 0, 63) &&
+    protocolString(step.title, 200) &&
+    protocolString(step.description, 2_000) &&
+    boundedStringList(step.expectedFiles, 64, 500) &&
+    boundedStringList(step.dependencies, 64, 100) &&
+    boundedStringList(step.risks, 16, 500) &&
+    boundedStringList(step.tests, 32, 500) &&
+    Array.isArray(step.tests) &&
+    step.tests.length > 0 &&
+    boundedStringList(step.postconditions, 16, 1_000) &&
+    Array.isArray(step.postconditions) &&
+    step.postconditions.length > 0 &&
+    ["pending", "ready", "active", "completed", "blocked", "failed"].includes(
+      String(step.status),
+    ) &&
+    typeof step.contractValid === "boolean" &&
+    boundedStringList(step.contractErrors, 16, 500)
   );
 }
 
@@ -529,7 +633,28 @@ export function isForgeEvent(value: unknown): value is ForgeEvent {
         protocolArray(candidate.assumptions, 64) &&
         candidate.assumptions.every((item) => protocolString(item, 2_000)) &&
         protocolArray(candidate.verification, 64) &&
-        candidate.verification.every((item) => protocolString(item, 2_000))
+        candidate.verification.every((item) => protocolString(item, 2_000)) &&
+        (candidate.graph === undefined ||
+          (protocolArray(candidate.graph, 64) &&
+            candidate.graph.every((step) => validGraphProposalStep(step))))
+      );
+    case "agent.graph":
+      return (
+        candidate.version === 1 &&
+        [
+          "proposed",
+          "validated",
+          "in-progress",
+          "blocked",
+          "completed",
+          "failed",
+        ].includes(String(candidate.status)) &&
+        protocolString(candidate.planArtifactId, 100) &&
+        (candidate.activeStepId === undefined ||
+          protocolString(candidate.activeStepId, 100)) &&
+        protocolArray(candidate.steps, 64) &&
+        candidate.steps.every((step) => validDependencyGraphStep(step)) &&
+        protocolString(candidate.note, 1_000)
       );
     case "tool.proposal":
       return (

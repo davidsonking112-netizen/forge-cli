@@ -127,6 +127,32 @@ test("full-screen TUI renders live session state across tabs", () => {
     }),
   );
   tui.handle(
+    event("agent.graph", {
+      version: 1,
+      status: "in-progress",
+      planArtifactId: "plan-1234567890abcdef",
+      activeStepId: "step-01-domain-a1b2c3d4",
+      steps: [
+        {
+          id: "step-01-domain-a1b2c3d4",
+          sourceId: "proposal-1",
+          index: 0,
+          title: "Domain model",
+          description: "Build the domain model",
+          expectedFiles: ["domain.js"],
+          dependencies: [],
+          risks: ["schema drift"],
+          tests: ["node --check domain.js"],
+          postconditions: ["domain loads"],
+          status: "active",
+          contractValid: true,
+          contractErrors: [],
+        },
+      ],
+      note: "Domain step is active",
+    }),
+  );
+  tui.handle(
     event("tool.proposal", {
       tool: "workspace.read",
       risk: "read-only",
@@ -164,6 +190,7 @@ test("full-screen TUI renders live session state across tabs", () => {
   assert.match(overview, /Verification passed/);
   assert.match(overview, /workspace\.read/);
   assert.match(overview, /Execution phase targeted-verify/);
+  assert.match(overview, /Dependency graph 0\/1/);
 
   input.emit("2");
   assert.match(output.text(), /Improve the application safely/);
@@ -173,6 +200,8 @@ test("full-screen TUI renders live session state across tabs", () => {
   assert.match(output.text(), /PASS/);
   assert.match(output.text(), /Enforced execution state/);
   assert.match(output.text(), /A targeted check with exit code 0/);
+  assert.match(output.text(), /step-01-domain-a1b2c3d4/);
+  assert.match(output.text(), /domain\.js/);
   tui.stop();
   assert.deepEqual(input.rawModes, [true, false]);
   assert.match(output.text(), /\x1b\[\?1049l/);

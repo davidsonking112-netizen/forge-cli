@@ -265,6 +265,26 @@ function renderEvent(event: ForgeEvent, json: boolean): void {
         `Budget: turns ${event.budget.providerTurns}/${event.budget.maxProviderTurns}, tools ${event.budget.toolCalls}/${event.budget.maxToolCalls}, repairs ${event.budget.repairAttempts}/${event.budget.maxRepairAttempts}`,
       );
       break;
+    case "agent.graph":
+      console.log(
+        `\nDependency graph: ${event.status} (${event.steps.filter((step) => step.status === "completed").length}/${event.steps.length} complete)`,
+      );
+      console.log(`Plan artifact: ${event.planArtifactId}`);
+      event.steps.forEach((step) => {
+        console.log(
+          `  ${step.status === "completed" ? "✓" : step.status === "active" ? "→" : step.status === "blocked" || step.status === "failed" ? "!" : "-"} ${step.id} [${step.status}] deps=${step.dependencies.join(",") || "none"}`,
+        );
+        console.log(
+          `    files: ${step.expectedFiles.join(", ") || "unspecified"}`,
+        );
+        console.log(`    tests: ${step.tests.join("; ") || "missing"}`);
+        console.log(
+          `    postconditions: ${step.postconditions.join("; ") || "missing"}`,
+        );
+        if (step.contractErrors.length)
+          console.log(`    contract: ${step.contractErrors.join("; ")}`);
+      });
+      break;
     case "agent.plan":
       console.log("\nPlan:");
       console.log(`Goal: ${event.goal}`);
@@ -1080,6 +1100,17 @@ async function auditCommand(args: ParsedArgs): Promise<number> {
             type: event.type,
             goal: event.goal,
             steps: event.steps,
+            graph: event.graph ?? null,
+          };
+        case "agent.graph":
+          return {
+            timestamp: event.timestamp,
+            type: event.type,
+            status: event.status,
+            planArtifactId: event.planArtifactId,
+            activeStepId: event.activeStepId ?? null,
+            steps: event.steps,
+            note: event.note,
           };
         case "agent.checklist":
           return {
@@ -1358,6 +1389,7 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
           scratchpad: session.scratchpad,
           checklist: session.checklist,
           plan: session.plan,
+          executionGraph: session.executionGraph ?? null,
           journal: session.journal,
           executionState: session.executionState ?? null,
           verification: session.verification,

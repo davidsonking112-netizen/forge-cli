@@ -279,8 +279,148 @@
           "goal": { "type": "string" },
           "steps": { "type": "array" },
           "assumptions": { "type": "array" },
-          "verification": { "type": "array" }
+          "verification": { "type": "array" },
+          "graph": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "required": [
+                "title",
+                "description",
+                "expectedFiles",
+                "dependsOn",
+                "risks",
+                "tests",
+                "postconditions"
+              ],
+              "properties": {
+                "title": { "type": "string", "maxLength": 200 },
+                "description": { "type": "string", "maxLength": 2000 },
+                "expectedFiles": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": { "type": "string", "maxLength": 500 }
+                },
+                "dependsOn": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": { "type": "integer", "minimum": 0, "maximum": 63 }
+                },
+                "risks": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": { "type": "string", "maxLength": 500 }
+                },
+                "tests": {
+                  "type": "array",
+                  "maxItems": 32,
+                  "items": { "type": "string", "maxLength": 500 }
+                },
+                "postconditions": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": { "type": "string", "maxLength": 1000 }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
         }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "agent.graph" } } },
+      "then": {
+        "required": ["version", "status", "planArtifactId", "steps", "note"],
+        "properties": {
+          "version": { "const": 1 },
+          "status": {
+            "enum": [
+              "proposed",
+              "validated",
+              "in-progress",
+              "blocked",
+              "completed",
+              "failed"
+            ]
+          },
+          "planArtifactId": { "type": "string", "maxLength": 100 },
+          "activeStepId": { "type": "string", "maxLength": 100 },
+          "note": { "type": "string", "maxLength": 1000 },
+          "steps": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "sourceId",
+                "index",
+                "title",
+                "description",
+                "expectedFiles",
+                "dependencies",
+                "risks",
+                "tests",
+                "postconditions",
+                "status",
+                "contractValid",
+                "contractErrors"
+              ],
+              "properties": {
+                "id": { "type": "string", "maxLength": 100 },
+                "sourceId": { "type": "string", "maxLength": 100 },
+                "index": { "type": "integer", "minimum": 0, "maximum": 63 },
+                "title": { "type": "string", "maxLength": 200 },
+                "description": { "type": "string", "maxLength": 2000 },
+                "expectedFiles": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": { "type": "string", "maxLength": 500 }
+                },
+                "dependencies": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": { "type": "string", "maxLength": 100 }
+                },
+                "risks": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": { "type": "string", "maxLength": 500 }
+                },
+                "tests": {
+                  "type": "array",
+                  "maxItems": 32,
+                  "items": { "type": "string", "maxLength": 500 }
+                },
+                "postconditions": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": { "type": "string", "maxLength": 1000 }
+                },
+                "status": {
+                  "enum": [
+                    "pending",
+                    "ready",
+                    "active",
+                    "completed",
+                    "blocked",
+                    "failed"
+                  ]
+                },
+                "contractValid": { "type": "boolean" },
+                "contractErrors": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": { "type": "string", "maxLength": 500 }
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
       }
     },
     {

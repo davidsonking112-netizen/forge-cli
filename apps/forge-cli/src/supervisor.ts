@@ -32,6 +32,7 @@ import {
   ImplementationStateMachine,
   type ExecutionStateSnapshot,
 } from "./execution-state.js";
+import { DependencyGraph } from "./dependency-graph.js";
 
 const FORGE_VERSION = "0.9.9";
 
@@ -105,6 +106,13 @@ export class ForgeSupervisor {
     } finally {
       await lock.release();
     }
+  }
+
+  private dependencyGraphEvent(
+    sessionId: string,
+    event: import("../../../packages/protocol/src/index.js").AgentGraphEvent,
+  ): ForgeEvent {
+    return { ...event, sessionId };
   }
 
   private executionStateEvent(
@@ -188,6 +196,7 @@ export class ForgeSupervisor {
       workerError = error instanceof Error ? error : new Error(String(error));
     });
     let sessionResult: RunResult | undefined;
+    let dependencyGraph: DependencyGraph | undefined;
     let completionRejections = 0;
     let approvalMode: "safe" | "session-approve" | "unsafe" = policy.mode;
     let approvalScope: ApprovalScope | undefined;
@@ -219,6 +228,20 @@ export class ForgeSupervisor {
           );
           continue;
         }
+        if (event.type === "agent.plan") {
+          dependencyGraph = new DependencyGraph(event);
+          await emit(
+            this.dependencyGraphEvent(
+              session.id,
+              dependencyGraph.event(
+                dependencyGraph.isValid()
+                  ? "Supervisor assigned stable dependency-graph step IDs and validated the proposed contracts."
+                  : "Supervisor blocked the proposed dependency graph because one or more step contracts are invalid.",
+                dependencyGraph.isValid() ? "validated" : "blocked",
+              ),
+            ),
+          );
+        }
         if (
           event.type === "agent.plan" ||
           event.type === "tool.proposal" ||
@@ -239,6 +262,43 @@ export class ForgeSupervisor {
           };
         }
         if (event.type === "tool.proposal") {
+          const graphGate = dependencyGraph?.actionGate(event.tool);
+          if (dependencyGraph && graphGate && !graphGate.ok) {
+            await emit(event);
+            await emit(
+              this.dependencyGraphEvent(
+                session.id,
+                dependencyGraph.event(
+                  `Graph blocked ${event.tool}: ${graphGate.reason}`,
+                  "blocked",
+                ),
+              ),
+            );
+            const denied: ApprovalResultEvent = {
+              ...createEnvelope("approval.result", session.id),
+              type: "approval.result",
+              proposalId: event.id,
+              decision: "deny",
+              category: "policy",
+            };
+            await emit(denied);
+            const graphDenied: ToolResultEvent = {
+              ...createEnvelope("tool.result", session.id),
+              type: "tool.result",
+              tool: event.tool,
+              ok: false,
+              error: {
+                code: "DEPENDENCY_GRAPH_BLOCKED",
+                message: graphGate.reason,
+                retryable: false,
+              },
+              approved: false,
+              durationMs: 0,
+            };
+            await emit(graphDenied);
+            send(graphDenied);
+            continue;
+          }
           const proposalGate = stateMachine.proposalGate(event.tool);
           if (!proposalGate.ok) {
             await emit(event);
@@ -274,7 +334,12 @@ export class ForgeSupervisor {
         if (stateSnapshot)
           await emit(this.executionStateEvent(session.id, stateSnapshot));
         if (event.type === "session.complete") {
-          const gate = stateMachine.completionGate(event);
+          const stateGate = stateMachine.completionGate(event);
+          const graphGate = dependencyGraph?.completionGate();
+          const gate =
+            graphGate && !graphGate.ok
+              ? { ok: false, reason: graphGate.reason }
+              : stateGate;
           if (event.status === "completed" && gate.ok) {
             await emit(
               this.executionStateEvent(
@@ -313,6 +378,17 @@ export class ForgeSupervisor {
         }
         await emit(event);
         if (event.type === "tool.proposal") {
+          if (dependencyGraph) {
+            await emit(
+              this.dependencyGraphEvent(
+                session.id,
+                dependencyGraph.event(
+                  `Graph authorized ${event.tool} for ${dependencyGraph.currentStepId() ?? "the next ready step"}.`,
+                  "in-progress",
+                ),
+              ),
+            );
+          }
           if (options.revokeApprovalScope?.()) {
             approvalMode = "safe";
             approvalScope = undefined;
@@ -431,6 +507,16 @@ export class ForgeSupervisor {
           const resultSnapshot = stateMachine.observe(resultEvent);
           if (resultSnapshot)
             await emit(this.executionStateEvent(session.id, resultSnapshot));
+          if (
+            dependencyGraph &&
+            resultEvent.ok &&
+            resultEvent.tool === "process.run" &&
+            stateMachine.current().phase === "full-verify"
+          ) {
+            const graphProgress = dependencyGraph.markStepCompleted();
+            if (graphProgress)
+              await emit(this.dependencyGraphEvent(session.id, graphProgress));
+          }
           send(resultEvent);
         }
         if (event.type === "session.complete") {

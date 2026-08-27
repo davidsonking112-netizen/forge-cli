@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { redactValue } from "./redaction.js";
 import type {
   AgentStateEvent,
+  AgentGraphEvent,
   CheckResult,
   ChecklistItem,
   ForgeEvent,
@@ -52,6 +53,7 @@ export interface SessionRecord {
   plan?: PlanSnapshot;
   journal: StepJournalEntry[];
   executionState?: AgentStateEvent;
+  executionGraph?: AgentGraphEvent;
   verification: CheckResult[];
   events: ForgeEvent[];
 }
@@ -128,6 +130,9 @@ export class SessionStore {
         ...(record.executionState
           ? { executionState: record.executionState }
           : {}),
+        ...(record.executionGraph
+          ? { executionGraph: record.executionGraph }
+          : {}),
         verification: record.verification.slice(0, 32).map((check) => ({
           ...check,
           command: check.command.slice(0, 500),
@@ -182,6 +187,9 @@ export class SessionStore {
     }
     if (sanitized.type === "agent.state") {
       record.executionState = { ...sanitized };
+    }
+    if (sanitized.type === "agent.graph") {
+      record.executionGraph = { ...sanitized };
     }
     if (sanitized.type === "agent.scratchpad") {
       record.scratchpad = sanitized.items.slice(0, 64).map((item) => ({
