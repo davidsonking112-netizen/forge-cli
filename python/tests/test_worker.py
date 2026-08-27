@@ -28,6 +28,25 @@ class WorkerTests(unittest.TestCase):
         self.assertGreater(buffer.compactions, 0)
         self.assertIn("Earlier bounded conversation", buffer.summary)
 
+    def test_horizon_compaction_keeps_multi_tool_turns_atomic(self):
+        buffer = LongHorizonBuffer(max_chars=1_200, max_messages=7, recent_messages=2)
+        buffer.append({"role": "system", "content": "system"})
+        buffer.append({"role": "user", "content": "task"})
+        buffer.append({"role": "assistant", "tool_calls": [{"id": "call-a"}, {"id": "call-b"}]})
+        buffer.append({"role": "tool", "tool_call_id": "call-a", "content": "result a"})
+        buffer.append({"role": "tool", "tool_call_id": "call-b", "content": "result b"})
+        for index in range(8):
+            buffer.append({"role": "user", "content": f"follow-up {index} " + ("x" * 120)})
+
+        snapshot = buffer.snapshot()
+        by_call_id = {str(item.get("tool_call_id")): item for item in snapshot if item.get("role") == "tool"}
+        for item in snapshot:
+            calls = item.get("tool_calls")
+            if item.get("role") == "assistant" and isinstance(calls, list):
+                self.assertEqual({str(call.get("id")) for call in calls}, set(by_call_id))
+        self.assertNotIn("call-a", by_call_id)
+        self.assertNotIn("call-b", by_call_id)
+
     def test_horizon_removes_orphaned_tool_results(self):
         buffer = LongHorizonBuffer(max_chars=10_000, max_messages=96)
         buffer.messages = [
@@ -148,6 +167,90 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(provider.tools, [])
         self.assertIn("evidence", provider.messages[1]["content"].lower())
         self.assertIn("approval", provider.messages[0]["content"].lower())
+
+    def test_provider_reuses_identical_read_result_without_reproposing(self):
+        class SequenceProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, *, messages, tools, on_text=None):
+                del messages, tools, on_text
+                self.calls += 1
+                if self.calls == 1:
+                    return ProviderReply(tool_calls=(ToolCall("read-1", "workspace.read", {"path": "README.md", "maxBytes": 1000}),))
+                if self.calls == 2:
+                    return ProviderReply(tool_calls=(ToolCall("read-2", "workspace.read", {"path": "README.md", "maxBytes": 1000}),))
+                return ProviderReply(text="Inspection is complete.")
+
+        provider = SequenceProvider()
+        agent = MockAgent("dedup-read")
+        agent.provider = provider
+        agent.prompt = "Inspect the repository without modifying files."
+        agent.horizon = LongHorizonBuffer(max_chars=10_000, max_messages=32)
+        events = agent.provider_turn()
+        events.extend(agent.on_provider_tool_result({
+            "tool": "workspace.read",
+            "ok": True,
+            "approved": True,
+            "output": {"path": "README.md", "content": "# Fixture"},
+        }))
+
+        self.assertEqual(provider.calls, 3)
+        self.assertTrue(any("Reused a cached read-only result" in item.get("items", [{}])[1].get("value", "") for item in events if item.get("type") == "agent.scratchpad"))
+        completion = next(item for item in events if item.get("type") == "session.complete")
+        self.assertEqual(completion["status"], "completed")
+
+    def test_provider_blocks_successful_exact_execution_repeat(self):
+        class SequenceProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, *, messages, tools, on_text=None):
+                del messages, tools, on_text
+                self.calls += 1
+                return ProviderReply(tool_calls=(ToolCall(f"run-{self.calls}", "process.run", {"command": "npm", "args": ["test"], "timeoutMs": 1000}),))
+
+        provider = SequenceProvider()
+        agent = MockAgent("dedup-run")
+        agent.provider = provider
+        agent.prompt = "Run the tests."
+        agent.horizon = LongHorizonBuffer(max_chars=10_000, max_messages=32)
+        events = agent.provider_turn()
+        events.extend(agent.on_provider_tool_result({
+            "tool": "process.run",
+            "ok": True,
+            "approved": True,
+            "output": {"command": "npm", "args": ["test"], "exitCode": 0, "output": "ok"},
+        }))
+
+        self.assertEqual(provider.calls, 2)
+        completion = next(item for item in events if item.get("type") == "session.complete")
+        self.assertEqual(completion["status"], "failed")
+        self.assertIn("repeated", completion["summary"])
+
+    def test_provider_recovers_bounded_text_only_implementation_responses(self):
+        class TextOnlyProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, *, messages, tools, on_text=None):
+                del messages, tools, on_text
+                self.calls += 1
+                return ProviderReply(text=f"I would implement this, but no tool call {self.calls}.")
+
+        provider = TextOnlyProvider()
+        agent = MockAgent("text-only")
+        agent.provider = provider
+        agent.prompt = "Create a file named result.txt."
+        agent.horizon = LongHorizonBuffer(max_chars=10_000, max_messages=32)
+        events = agent.provider_turn()
+
+        self.assertEqual(provider.calls, 3)
+        self.assertEqual(sum(1 for item in events if item.get("type") == "agent.repair"), 0)
+        completion = next(item for item in events if item.get("type") == "session.complete")
+        self.assertEqual(completion["status"], "failed")
+        self.assertIn("text", completion["summary"])
+        self.assertTrue(any("Text-only response recovered" in item.get("items", [{}])[1].get("value", "") for item in events if item.get("type") == "agent.scratchpad"))
 
     def test_repair_attempts_escalate_and_exhaust_at_four(self):
         class RepairProvider:

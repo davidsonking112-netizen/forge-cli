@@ -70,3 +70,24 @@ The named presets are configuration conveniences, not guarantees that a particul
 2. [OpenRouter Quickstart](https://openrouter.ai/docs/quickstart)
 3. [Groq OpenAI compatibility](https://console.groq.com/docs/openai)
 4. [xAI Inference REST API](https://docs.x.ai/developers/rest-api-reference/inference)
+
+## Long-horizon implementation loop
+
+Provider-backed coding sessions now advance through a bounded continuation loop rather than relying only on the model to decide when to stop. Forge emits checklist and scratchpad checkpoints around provider turns and supervisor results, so the CLI can show whether the session is inspecting, planning, changing, or verifying.
+
+Forge computes a stable signature for each proposed tool name and argument object. Successful read-only results for `workspace.list`, `workspace.search`, `workspace.read`, `workspace.diff`, and `git.status` are cached for the session. If a provider asks for the exact same read again, Forge replays the approved result into the provider history without asking the supervisor to execute the read again. Exact repeats of non-cacheable successful actions, including process execution and writes, fail closed instead of silently looping. A failed action is removed from the repetition guard only for the existing bounded repair policy, allowing up to four explicitly recorded alternate/deep-thinking attempts.
+
+When a task clearly requests a mutation but the provider returns text without a tool call, Forge makes at most two additional continuation requests. Each request explicitly asks for one bounded implementation action and warns against repeating completed reads. If the provider still does not propose a tool, the session ends as failed rather than claiming that the implementation happened. The existing maximum horizon-turn bound remains authoritative.
+
+Long-horizon compaction also treats an assistant message containing multiple tool calls and all matching tool results as one atomic history group. Compaction may summarize or remove the complete group, but it does not leave an assistant tool call without its results or a stray tool result without its matching assistant call. These controls improve reliability without changing the supervisor’s authority: the worker still proposes, and only the TypeScript supervisor validates, approves, and executes local operations.
+
+The following optional controls tune the bounded behavior. Values are clamped by the worker and should be increased only when the task genuinely requires more model turns.
+
+| Variable                         |  Default | Purpose                                                                      |
+| -------------------------------- | -------: | ---------------------------------------------------------------------------- |
+| `FORGE_MAX_HORIZON_TURNS`        |     `24` | Maximum provider turns in one session.                                       |
+| `FORGE_MAX_TEXT_ONLY_RECOVERIES` |      `2` | Maximum continuation requests after text-only output during a mutation task. |
+| `FORGE_MAX_HORIZON_CHARS`        | `60,000` | Maximum retained conversation context before compaction.                     |
+| `FORGE_MAX_HORIZON_MESSAGES`     |     `96` | Maximum retained conversation messages before compaction.                    |
+
+These mechanisms are reliability boundaries, not a guarantee of autonomous success. A provider can still misunderstand a task, produce an invalid patch, hit a quota limit, or stop after a legitimate explanation. Forge reports those conditions and does not convert them into a false success.

@@ -72,8 +72,9 @@ class LongHorizonBuffer:
             self.messages = self._truncate_messages(self.messages[: self.max_messages])
             return
         anchors = self.messages[:2]
-        recent = self.messages[-self.recent_messages :]
-        omitted = self.messages[2 : -self.recent_messages]
+        recent_start = self._recent_start(self.messages)
+        recent = self.messages[recent_start:]
+        omitted = self.messages[2:recent_start]
         fragments = [self._message_summary(item) for item in omitted]
         prior = self.summary
         self.summary = "\n".join(
@@ -85,7 +86,7 @@ class LongHorizonBuffer:
         }
         self.messages = anchors + [summary_message] + recent
         while self._size(self.messages) > self.max_chars and len(self.messages) > 3:
-            self.messages.pop(3)
+            self._drop_oldest_turn(self.messages, 3)
         if self._size(self.messages) > self.max_chars:
             fixed = self.messages[:2]
             low, high, best = 0, len(self.summary), ""
@@ -100,8 +101,35 @@ class LongHorizonBuffer:
                     high = midpoint - 1
             self.summary = best
             self.messages = fixed + [{"role": "system", "content": best}]
-        self.messages = self._truncate_messages(self.messages)
+        self.messages = self._normalize_tool_history(self._truncate_messages(self.messages))
         self.compactions += 1
+
+    def _recent_start(self, messages: list[dict[str, Any]]) -> int:
+        start = max(2, len(messages) - self.recent_messages)
+        if start < len(messages) and messages[start].get("role") == "tool":
+            call_id = str(messages[start].get("tool_call_id", ""))
+            for index in range(start - 1, 1, -1):
+                candidate = messages[index]
+                calls = candidate.get("tool_calls")
+                if candidate.get("role") == "assistant" and isinstance(calls, list) and any(isinstance(call, dict) and str(call.get("id", "")) == call_id for call in calls):
+                    return index
+        return start
+
+
+    @staticmethod
+    def _drop_oldest_turn(messages: list[dict[str, Any]], index: int) -> None:
+        if index >= len(messages):
+            return
+        candidate = messages[index]
+        calls = candidate.get("tool_calls")
+        if candidate.get("role") != "assistant" or not isinstance(calls, list) or not calls:
+            del messages[index]
+            return
+        call_ids = {str(call.get("id")) for call in calls if isinstance(call, dict) and call.get("id")}
+        end = index + 1
+        while end < len(messages) and messages[end].get("role") == "tool" and str(messages[end].get("tool_call_id", "")) in call_ids:
+            end += 1
+        del messages[index:end]
 
     def _truncate_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result = [dict(message) for message in messages]

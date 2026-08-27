@@ -6,6 +6,7 @@ mock mode plus an opt-in OpenAI-compatible provider.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -83,6 +84,22 @@ def high_risk_goal(prompt: str) -> bool:
     return bool(re.search(r"\b(create|write|edit|modify|delete|remove|run|execute|commit|push|deploy|install|migrate)\b", prompt, re.IGNORECASE))
 
 
+def tool_signature(call: ToolCall) -> str:
+    """Return a stable, non-secret identity for an exact provider tool request."""
+    canonical = json.dumps({"name": call.name, "arguments": call.arguments}, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def progress_step_for_tool(tool_name: str) -> str:
+    if tool_name in {"workspace.apply_patch", "workspace.apply_unified_diff", "git.branch", "git.stage", "git.commit"}:
+        return "change"
+    if tool_name == "process.run":
+        return "verify"
+    if tool_name in TOOL_RISKS:
+        return "inspect"
+    return "summarize"
+
+
 def selected_roles(prompt: str, requested: int) -> tuple[str, ...]:
     bounded = max(1, min(requested, len(ROLES)))
     if high_risk_goal(prompt):
@@ -125,6 +142,10 @@ class MockAgent:
     pending_call: ToolCall | None = None
     pending_calls: list[ToolCall] = field(default_factory=list)
     pending_assistant_message: dict[str, Any] = field(default_factory=dict)
+    tool_request_counts: dict[str, int] = field(default_factory=dict)
+    tool_result_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
+    text_only_recoveries: int = 0
+    mutation_applied: bool = False
     turn_count: int = 0
     repair_attempts: int = 0
 
@@ -183,7 +204,9 @@ class MockAgent:
                 user_system = os.environ.get("FORGE_SYSTEM_PROMPT", "").strip()[:20_000]
                 self._append_message({"role": "system", "content": f"{base_system}\\n\\nUser-configured preference:\\n{user_system}" if user_system else base_system})
                 self._append_message({"role": "user", "content": f"Task: {self.prompt}\\n\\nBounded repository context:\\n{context_summary}"})
-                return self.provider_turn()
+                self.stage = "inspect"
+                self.steps = task_checklist("inspect")
+                return self._progress_events("inspect", "Session started. Forge will inspect before planning or changing files.") + self.provider_turn()
             return self.handle_prompt(self.prompt)
         return [event("agent.text", self.session_id, text="Forge is ready. Describe the coding task you want to work on.")]
 
@@ -240,12 +263,64 @@ class MockAgent:
             tool_name = self.pending_call.name
             if tool_name not in TOOL_RISKS:
                 return responses + [event("session.complete", self.session_id, status="failed", summary=f"The provider requested unsupported tool {tool_name}.", changedFiles=self.changed_files, checks=self.verification_checks)]
-            responses.append(event("tool.proposal", self.session_id, tool=tool_name, risk=TOOL_RISKS[tool_name], arguments=self.pending_call.arguments, reason="The configured provider selected this tool for the current task."))
-            return responses
+            return responses + self._next_tool_action()
         if reply.text:
             self._append_message({"role": "assistant", "content": reply.text})
-            return responses
+            if self._requires_mutation() and not self._has_progress_evidence() and self.text_only_recoveries < bounded_int("FORGE_MAX_TEXT_ONLY_RECOVERIES", 2, 0, 3):
+                self.text_only_recoveries += 1
+                self._append_message({"role": "user", "content": "Your last response was text-only, but this task requires an implementation. Continue with exactly one bounded tool action for the next missing step; do not repeat an already completed read. If implementation is impossible, state the blocker explicitly."})
+                return responses + self._progress_events("plan", f"Text-only response recovered ({self.text_only_recoveries}); requesting the next bounded implementation action.") + self.provider_turn()
+            if self._requires_mutation() and not self._has_progress_evidence():
+                return responses + [event("session.complete", self.session_id, status="failed", summary="The provider returned text without applying or verifying the requested implementation after bounded continuation attempts.", changedFiles=self.changed_files, checks=self.verification_checks)]
+            return responses + [event("session.complete", self.session_id, status="completed", summary="The provider completed with a text response and did not request a tool.", changedFiles=self.changed_files, checks=self.verification_checks)]
         return responses + [event("session.complete", self.session_id, status="completed", summary="The provider completed without requesting another tool.", changedFiles=self.changed_files, checks=self.verification_checks)]
+
+    def _requires_mutation(self) -> bool:
+        return high_risk_goal(self.prompt) and not bool(re.search(r"\b(do not|don't|without)\s+(modify|change|write|edit|run|execute)", self.prompt, re.IGNORECASE))
+
+    def _has_progress_evidence(self) -> bool:
+        if self.mutation_applied:
+            return True
+        return any(check.get("status") == "passed" for check in self.verification_checks)
+
+    def _progress_events(self, active: str, note: str) -> list[dict[str, Any]]:
+        self.stage = active
+        self.steps = task_checklist(active)
+        return [
+            event("agent.checklist", self.session_id, items=self.steps),
+            event("agent.scratchpad", self.session_id, items=[
+                {"key": "task", "value": self.prompt, "status": "active"},
+                {"key": "current-step", "value": note, "status": "active"},
+                {"key": "change", "value": "No unverified mutation is claimed", "status": "todo"},
+                {"key": "verification", "value": "Verification evidence will be recorded from supervisor results", "status": "todo"},
+                {"key": "next-action", "value": "Continue one bounded step and reassess progress", "status": "todo"},
+            ]),
+        ]
+
+    def _next_tool_action(self) -> list[dict[str, Any]]:
+        """Select the next pending call, replaying only cached read-only results."""
+        responses: list[dict[str, Any]] = []
+        while self.pending_calls:
+            call = self.pending_calls[0]
+            if call.name not in TOOL_RISKS:
+                return responses + [event("session.complete", self.session_id, status="failed", summary=f"The provider requested unsupported tool {call.name}.", changedFiles=self.changed_files, checks=self.verification_checks)]
+            signature = tool_signature(call)
+            if call.name in {"workspace.list", "workspace.search", "workspace.read", "workspace.diff", "git.status"} and signature in self.tool_result_cache:
+                cached = self.tool_result_cache[signature]
+                self.pending_calls.pop(0)
+                self.pending_call = self.pending_calls[0] if self.pending_calls else None
+                self._append_message({"role": "tool", "tool_call_id": call.id, "content": json.dumps(cached["content"], ensure_ascii=False)})
+                responses.extend(self._progress_events("inspect", f"Reused a cached read-only result instead of repeating {call.name}."))
+                continue
+            count = self.tool_request_counts.get(signature, 0)
+            if count > 0:
+                return responses + self._progress_events("plan", f"Blocked an exact repeated {call.name} request; the previous result is already available.") + [event("session.complete", self.session_id, status="failed", summary=f"The provider repeated the same non-cacheable tool request ({call.name}) instead of making progress.", changedFiles=self.changed_files, checks=self.verification_checks)]
+            self.tool_request_counts[signature] = count + 1
+            self.pending_call = call
+            return responses + self._progress_events(progress_step_for_tool(call.name), f"Waiting for approval for bounded tool step {call.name}.") + [event("tool.proposal", self.session_id, tool=call.name, risk=TOOL_RISKS[call.name], arguments=call.arguments, reason="The configured provider selected this bounded tool step; Forge will wait for supervisor approval.")]
+        self.pending_call = None
+        self.pending_assistant_message = {}
+        return responses + self.provider_turn()
 
     def on_tool_result(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         if self.provider is not None and os.environ.get("FORGE_PROVIDER", "mock").lower() not in {"mock", "test"}:
@@ -275,18 +350,22 @@ class MockAgent:
             repair_events.append(event("agent.repair", self.session_id, attempt=self.repair_attempts, maxAttempts=4, strategy="deep-thinking" if self.repair_attempts == 4 else "alternate", status="succeeded", reason="The next approved tool step completed after a bounded repair attempt."))
         self.repair_attempts = 0
         current_call = self.pending_call
-        result_content = payload.get("output")
+        result_content = payload.get("output") if payload.get("ok") else payload.get("error")
         self._append_message({"role": "tool", "tool_call_id": current_call.id, "content": json.dumps(result_content, ensure_ascii=False)})
+        if current_call.name in {"workspace.apply_patch", "workspace.apply_unified_diff", "git.branch", "git.stage", "git.commit"} and payload.get("approved", False) and payload.get("ok"):
+            self.mutation_applied = True
+            output = payload.get("output") if isinstance(payload.get("output"), dict) else {}
+            path = output.get("path")
+            if isinstance(path, str) and path not in self.changed_files:
+                self.changed_files.append(path)
+            changed = output.get("changedFiles")
+            if isinstance(changed, list):
+                self.changed_files.extend(item for item in changed if isinstance(item, str) and item not in self.changed_files)
+        if current_call.name in {"workspace.list", "workspace.search", "workspace.read", "workspace.diff", "git.status"} and payload.get("approved", False) and payload.get("ok"):
+
+            self.tool_result_cache[tool_signature(current_call)] = {"content": result_content, "ok": bool(payload.get("ok"))}
         self.pending_calls = self.pending_calls[1:]
-        if self.pending_calls:
-            self.pending_call = self.pending_calls[0]
-            tool_name = self.pending_call.name
-            if tool_name not in TOOL_RISKS:
-                return repair_events + [event("session.complete", self.session_id, status="failed", summary=f"The provider requested unsupported tool {tool_name}.", changedFiles=self.changed_files, checks=self.verification_checks)]
-            return repair_events + [event("tool.proposal", self.session_id, tool=tool_name, risk=TOOL_RISKS[tool_name], arguments=self.pending_call.arguments, reason="The configured provider selected this tool for the current task.")]
-        self.pending_call = None
-        self.pending_assistant_message = {}
-        return repair_events + self.provider_turn()
+        return repair_events + self._progress_events(progress_step_for_tool(current_call.name), f"Completed supervisor result for {current_call.name}; Forge is reassessing the next bounded step.") + self._next_tool_action()
 
     def _handle_provider_failure(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
@@ -300,6 +379,10 @@ class MockAgent:
         events.append(event("agent.repair", self.session_id, attempt=self.repair_attempts, maxAttempts=4, strategy=strategy, status="started", reason="The prior tool result failed; Forge will request a different bounded approach." if strategy == "alternate" else "Three alternate approaches failed; Forge is making the required final deep-thinking repair attempt."))
         result_content = payload.get("error")
         if self.pending_call is not None:
+            # A failed action is eligible for the bounded repair policy. Successful
+            # exact repeats remain guarded, but a repair must be allowed to alter
+            # the command or approach rather than being blocked by deduplication.
+            self.tool_request_counts.pop(tool_signature(self.pending_call), None)
             self._append_message({"role": "tool", "tool_call_id": self.pending_call.id, "content": json.dumps(result_content, ensure_ascii=False)})
             self.pending_calls = []
             self.pending_call = None
