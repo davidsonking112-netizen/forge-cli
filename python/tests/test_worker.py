@@ -11,7 +11,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from forge_agent.horizon import LongHorizonBuffer
 from forge_agent.orchestration import BoundedOrchestrator
 from forge_agent.providers import MockProvider, OpenAICompatibleProvider, ProviderReply, ToolCall, build_provider, redact
-from forge_agent.worker import MockAgent, main, protocol_json, redact_error, selected_roles, verification_check
+from forge_agent.worker import MockAgent, main, protocol_json, redact_error, sanitize_surrogates, selected_roles, verification_check
 
 
 class WorkerTests(unittest.TestCase):
@@ -430,8 +430,19 @@ class WorkerTests(unittest.TestCase):
         payload = {"type": "agent.text", "text": "safe-" + chr(0xDC9D) + "-text"}
         encoded = protocol_json(payload)
         self.assertNotIn(chr(0xDC9D), encoded)
-        self.assertEqual(json.loads(encoded), payload)
+        self.assertEqual(json.loads(encoded), {"type": "agent.text", "text": "safe-\\udc9d-text"})
         encoded.encode("utf-8")
+
+    def test_worker_sanitizes_lone_surrogate_input(self):
+        value = {"prompt": "safe-" + chr(0xDC9D) + "-text"}
+        sanitized = sanitize_surrogates(value)
+        self.assertEqual(sanitized["prompt"], "safe-\\udc9d-text")
+        raw_line = '{"sessionId":"surrogate","type":"user.prompt","prompt":"safe-' + chr(0xDC9D) + '-text"}\n'
+        output = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(raw_line)), redirect_stdout(output):
+            self.assertEqual(main(), 0)
+        output.getvalue().encode("utf-8")
+        self.assertIn("safe-\\\\udc9d-text", output.getvalue())
 
     def test_worker_rejects_oversized_and_non_object_input(self):
         output = io.StringIO()

@@ -400,9 +400,20 @@ def verification_check(
     }
 
 
+def sanitize_surrogates(value: Any) -> Any:
+    """Replace unpaired surrogates with printable JSON escape text recursively."""
+    if isinstance(value, str):
+        return value.encode("utf-8", "backslashreplace").decode("utf-8")
+    if isinstance(value, list):
+        return [sanitize_surrogates(item) for item in value]
+    if isinstance(value, dict):
+        return {sanitize_surrogates(key): sanitize_surrogates(item) for key, item in value.items()}
+    return value
+
+
 def protocol_json(value: Any) -> str:
     """Serialize protocol events without emitting invalid Unicode surrogates."""
-    return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+    return json.dumps(sanitize_surrogates(value), ensure_ascii=True, separators=(",", ":"))
 
 
 def main() -> int:
@@ -413,9 +424,9 @@ def main() -> int:
             continue
         payload: dict[str, Any] = {}
         try:
-            if len(line.encode("utf-8")) > MAX_INPUT_LINE_BYTES:
+            if len(line.encode("utf-8", "backslashreplace")) > MAX_INPUT_LINE_BYTES:
                 raise ValueError("worker input line exceeds the 1000000-byte limit")
-            parsed = json.loads(line)
+            parsed = sanitize_surrogates(json.loads(line))
             if not isinstance(parsed, dict):
                 raise ValueError("worker input must be a JSON object")
             payload = parsed
