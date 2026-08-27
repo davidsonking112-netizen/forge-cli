@@ -25,7 +25,47 @@ class LongHorizonBuffer:
     def snapshot(self) -> list[dict[str, Any]]:
         if len(self.messages) > self.max_messages or self._size(self.messages) > self.max_chars:
             self._compact()
+        normalized = self._normalize_tool_history(self.messages)
+        if normalized != self.messages:
+            self.messages = normalized
         return [*self.messages]
+
+    @staticmethod
+    def _normalize_tool_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Keep assistant tool calls and their tool results as atomic history turns."""
+        result: list[dict[str, Any]] = []
+        pending_start: int | None = None
+        pending_ids: set[str] = set()
+        for message in messages:
+            role = message.get("role")
+            calls = message.get("tool_calls")
+            if role == "assistant" and isinstance(calls, list) and calls:
+                if pending_ids and pending_start is not None:
+                    result = result[:pending_start]
+                pending_start = len(result)
+                pending_ids = {
+                    str(call.get("id"))
+                    for call in calls
+                    if isinstance(call, dict) and call.get("id")
+                }
+                result.append(message)
+                continue
+            if role == "tool":
+                call_id = str(message.get("tool_call_id", ""))
+                if pending_ids and call_id in pending_ids:
+                    result.append(message)
+                    pending_ids.remove(call_id)
+                    if not pending_ids:
+                        pending_start = None
+                continue
+            if pending_ids and pending_start is not None:
+                result = result[:pending_start]
+                pending_start = None
+                pending_ids.clear()
+            result.append(message)
+        if pending_ids and pending_start is not None:
+            result = result[:pending_start]
+        return result
 
     def _compact(self) -> None:
         if len(self.messages) <= 3:

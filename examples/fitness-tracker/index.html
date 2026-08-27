@@ -2,149 +2,254 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Fitness Tracker — Examples</title>
-    <link rel="stylesheet" href="style.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Fitness Tracker Pro</title>
+    <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <main class="app" id="app">
-      <header class="app-header">
-        <h1>Fitness Tracker</h1>
-        <p class="muted">
-          Lightweight, local-only tracker — runs with python3 -m http.server
-        </p>
+    <a class="skip-link" href="#main">Skip to main content</a>
+    <div class="app-shell">
+      <header class="app-header" role="banner">
+        <div>
+          <p class="eyebrow">Local-first dashboard</p>
+          <h1>Fitness Tracker Pro</h1>
+          <p class="lede">
+            Plan, log, and review workouts. Your data stays in this browser
+            unless you export it.
+          </p>
+        </div>
+        <nav class="header-actions" aria-label="App actions">
+          <button class="button ghost" id="themeToggle" type="button">
+            Use dark theme
+          </button>
+          <button class="button ghost" id="exportButton" type="button">
+            Export JSON
+          </button>
+          <label class="button ghost file-button" for="importFile"
+            >Import JSON</label
+          >
+          <input
+            id="importFile"
+            class="visually-hidden"
+            type="file"
+            accept="application/json,.json"
+          />
+          <button class="button danger-ghost" id="clearButton" type="button">
+            Clear data
+          </button>
+        </nav>
       </header>
 
-      <section class="top-grid">
-        <div class="card goal-card" aria-labelledby="goal-heading">
-          <h2 id="goal-heading">Weekly Goal</h2>
-          <div class="goal-row">
-            <label for="goal-input">Minutes per week</label>
-            <input
-              id="goal-input"
-              inputmode="numeric"
-              type="number"
-              min="1"
-              max="10000"
-            />
-            <button id="save-goal" class="btn">Save</button>
-          </div>
-          <div class="progress">
-            <div
-              class="progress-bar"
-              id="goal-progress"
-              role="progressbar"
-              aria-labelledby="goal-heading"
-              aria-valuemin="0"
-              aria-valuemax="100"
-              aria-valuenow="0"
-              aria-valuetext="0 of 0 minutes this week"
-            ></div>
-          </div>
-          <p
-            class="muted small"
-            id="goal-summary"
-            role="status"
-            aria-live="polite"
-          ></p>
-        </div>
+      <main id="main" class="dashboard" tabindex="-1">
+        <section class="hero-grid" aria-label="Fitness summary">
+          <article
+            class="card today-card accent-card"
+            aria-labelledby="todayTitle"
+          >
+            <div class="card-kicker">Today</div>
+            <h2 id="todayTitle">Ready to move?</h2>
+            <p id="todaySummary" class="large-number">0 min</p>
+            <p id="todayMeta" class="muted">No workouts logged today.</p>
+          </article>
 
-        <div class="card stats-card" aria-labelledby="stats-heading">
-          <h2 id="stats-heading">Activity & Streak</h2>
-          <div class="stats-grid">
-            <div>
-              <div class="stat-value" id="weekly-minutes">0</div>
-              <div class="muted small">Minutes this week</div>
-            </div>
-            <div>
-              <div class="stat-value" id="workout-count">0</div>
-              <div class="muted small">Workouts this week</div>
-            </div>
-            <div>
-              <div class="stat-value" id="current-streak">0</div>
-              <div class="muted small">Day streak</div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="main-grid">
-        <aside class="card presets" aria-labelledby="presets-heading">
-          <h2 id="presets-heading">Exercise Presets</h2>
-          <ul id="preset-list" class="preset-list" aria-live="polite"></ul>
-          <form id="preset-form" class="preset-form" aria-label="Add preset">
-            <input
-              id="preset-name"
-              placeholder="Preset name"
-              aria-label="preset name"
-            />
-            <input
-              id="preset-default"
-              type="number"
-              min="1"
-              max="1440"
-              placeholder="Default minutes (optional)"
-              inputmode="numeric"
-              aria-label="Default preset minutes (optional)"
-            />
-            <button class="btn" type="submit">Add</button>
-          </form>
-          <p class="muted small">
-            Presets speed up logging. Edit or remove any preset.
-          </p>
-        </aside>
-
-        <section class="card log-card" aria-labelledby="log-heading">
-          <h2 id="log-heading">Log Workout</h2>
-          <form id="workout-form" class="workout-form" aria-label="Log workout">
-            <div class="row">
-              <label for="workout-date">Date</label>
-              <input id="workout-date" type="date" required />
-            </div>
-
-            <div id="exercises-container">
-              <!-- exercise rows inserted here -->
-            </div>
-
-            <div class="form-actions">
-              <button id="add-exercise" class="btn secondary" type="button">
-                + Add exercise
-              </button>
+          <article class="card progress-card" aria-labelledby="weeklyTitle">
+            <div class="card-row">
               <div>
-                <button class="btn primary" type="submit">Save Workout</button>
-                <button id="clear-form" class="btn" type="button">Clear</button>
+                <div class="card-kicker">Weekly goal</div>
+                <h2 id="weeklyTitle">0 / 150 min</h2>
               </div>
+              <form id="goalForm" class="goal-form">
+                <label for="weeklyGoal">Goal minutes</label>
+                <div class="inline-controls">
+                  <input
+                    id="weeklyGoal"
+                    name="weeklyGoal"
+                    type="number"
+                    min="1"
+                    max="10080"
+                    step="5"
+                    inputmode="numeric"
+                  />
+                  <button class="button small" type="submit">Save</button>
+                </div>
+              </form>
             </div>
-          </form>
-          <div id="log-empty" class="empty muted">
-            Start by adding a workout — it will appear in the list to the right.
+            <progress
+              id="weeklyProgress"
+              value="0"
+              max="100"
+              aria-labelledby="weeklyTitle"
+            ></progress>
+            <p id="weeklyMeta" class="muted">
+              Progress updates from workouts dated this week.
+            </p>
+          </article>
+
+          <article class="card stat-card" aria-labelledby="streakTitle">
+            <div class="card-kicker">Current streak</div>
+            <h2 id="streakTitle"><span id="streakValue">0</span> days</h2>
+            <p class="muted" id="streakMeta">
+              Log a workout today to start a streak.
+            </p>
+          </article>
+
+          <article class="card stat-card" aria-labelledby="totalsTitle">
+            <div class="card-kicker">All-time totals</div>
+            <h2 id="totalsTitle"><span id="totalWorkouts">0</span> workouts</h2>
+            <p class="muted"><span id="totalMinutes">0</span> minutes logged</p>
+          </article>
+        </section>
+
+        <section class="content-grid">
+          <div class="stack">
+            <section class="card" aria-labelledby="chartTitle">
+              <div class="section-heading">
+                <div>
+                  <div class="card-kicker">Last 7 days</div>
+                  <h2 id="chartTitle">Activity chart</h2>
+                </div>
+                <p class="muted compact">Select a day for details.</p>
+              </div>
+              <div
+                id="activityChart"
+                class="activity-chart"
+                role="list"
+                aria-label="Minutes by day for the last seven days"
+              ></div>
+              <div id="dayDetails" class="day-details" aria-live="polite"></div>
+            </section>
+
+            <section class="card" aria-labelledby="historyTitle">
+              <div class="section-heading">
+                <div>
+                  <div class="card-kicker">History</div>
+                  <h2 id="historyTitle">Recent workouts</h2>
+                </div>
+              </div>
+              <div id="historyList" class="history-list"></div>
+            </section>
           </div>
+
+          <aside class="stack" aria-label="Workout logging and presets">
+            <section class="card form-card" aria-labelledby="formTitle">
+              <div class="section-heading">
+                <div>
+                  <div class="card-kicker">Log workout</div>
+                  <h2 id="formTitle">Add a session</h2>
+                </div>
+                <button
+                  class="button ghost small"
+                  id="resetFormButton"
+                  type="button"
+                >
+                  Reset
+                </button>
+              </div>
+              <form id="workoutForm" novalidate>
+                <input type="hidden" id="editingWorkoutId" />
+                <div class="field-grid">
+                  <label
+                    >Date
+                    <input id="workoutDate" name="date" type="date" required />
+                  </label>
+                  <label
+                    >Notes <span class="optional">optional</span>
+                    <textarea
+                      id="workoutNotes"
+                      name="notes"
+                      rows="3"
+                      maxlength="1000"
+                      placeholder="How did it feel? Any context to remember?"
+                    ></textarea>
+                  </label>
+                </div>
+
+                <div class="subsection-heading">
+                  <h3>Exercises</h3>
+                  <button
+                    class="button ghost small"
+                    id="addExerciseButton"
+                    type="button"
+                  >
+                    Add exercise
+                  </button>
+                </div>
+                <div id="exerciseList" class="exercise-list"></div>
+
+                <div class="form-actions">
+                  <button
+                    class="button primary"
+                    id="saveWorkoutButton"
+                    type="submit"
+                  >
+                    Save workout
+                  </button>
+                  <button
+                    class="button ghost"
+                    id="cancelEditButton"
+                    type="button"
+                    hidden
+                  >
+                    Cancel edit
+                  </button>
+                </div>
+              </form>
+            </section>
+
+            <section class="card" aria-labelledby="presetTitle">
+              <div class="section-heading">
+                <div>
+                  <div class="card-kicker">Reusable</div>
+                  <h2 id="presetTitle">Presets</h2>
+                </div>
+              </div>
+              <form id="presetForm" class="preset-form" novalidate>
+                <input type="hidden" id="editingPresetId" />
+                <label
+                  >Preset name
+                  <input
+                    id="presetName"
+                    type="text"
+                    maxlength="80"
+                    placeholder="e.g. Lunch strength circuit"
+                  />
+                </label>
+                <p class="muted compact">
+                  Presets save the exercises currently shown in the workout
+                  form.
+                </p>
+                <div class="form-actions compact-actions">
+                  <button
+                    class="button small"
+                    id="savePresetButton"
+                    type="submit"
+                  >
+                    Save preset
+                  </button>
+                  <button
+                    class="button ghost small"
+                    id="cancelPresetEditButton"
+                    type="button"
+                    hidden
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+              <div id="presetList" class="preset-list"></div>
+            </section>
+          </aside>
         </section>
+      </main>
+    </div>
 
-        <section class="card history-card" aria-labelledby="history-heading">
-          <h2 id="history-heading">Recent Workouts</h2>
-          <div id="history-list" class="history-list" aria-live="polite"></div>
-        </section>
-      </section>
-
-      <section class="card summary-card" aria-labelledby="summary-heading">
-        <h2 id="summary-heading">Weekly Summary</h2>
-        <div
-          id="week-chart"
-          class="week-chart"
-          role="group"
-          aria-label="Weekly activity chart"
-        ></div>
-        <p class="muted small" id="summary-note">
-          View your last 7 days of activity. Click a bar to see that day's
-          workouts.
-        </p>
-      </section>
-
-      <footer class="app-footer muted small">
-        Data stored locally in your browser's localStorage. No network required.
-      </footer>
-    </main>
-    <script src="app.js"></script>
+    <div
+      id="toastRegion"
+      class="toast-region"
+      aria-live="polite"
+      aria-atomic="true"
+    ></div>
+    <script type="module" src="./app.js"></script>
   </body>
 </html>

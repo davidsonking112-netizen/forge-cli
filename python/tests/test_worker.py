@@ -28,6 +28,20 @@ class WorkerTests(unittest.TestCase):
         self.assertGreater(buffer.compactions, 0)
         self.assertIn("Earlier bounded conversation", buffer.summary)
 
+    def test_horizon_removes_orphaned_tool_results(self):
+        buffer = LongHorizonBuffer(max_chars=10_000, max_messages=96)
+        buffer.messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "task"},
+            {"role": "tool", "tool_call_id": "orphan", "content": "bad"},
+            {"role": "assistant", "tool_calls": [{"id": "call-1"}]},
+            {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+            {"role": "user", "content": "continue"},
+        ]
+        snapshot = buffer.snapshot()
+        self.assertNotIn("orphan", json.dumps(snapshot))
+        self.assertIn("call-1", json.dumps(snapshot))
+
     def test_mock_worker_emits_plan_and_completion(self):
         messages = [
             {
