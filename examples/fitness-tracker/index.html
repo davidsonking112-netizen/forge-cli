@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Fitness Tracker — Examples</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="app" id="app">
+      <header class="app-header">
+        <h1>Fitness Tracker</h1>
+        <p class="muted">
+          Lightweight, local-only tracker — runs with python3 -m http.server
+        </p>
+      </header>
+
+      <section class="top-grid">
+        <div class="card goal-card" aria-labelledby="goal-heading">
+          <h2 id="goal-heading">Weekly Goal</h2>
+          <div class="goal-row">
+            <label for="goal-input">Minutes per week</label>
+            <input
+              id="goal-input"
+              inputmode="numeric"
+              type="number"
+              min="1"
+              max="10000"
+            />
+            <button id="save-goal" class="btn">Save</button>
+          </div>
+          <div class="progress" aria-hidden="false">
+            <div
+              class="progress-bar"
+              id="goal-progress"
+              role="progressbar"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+            ></div>
+          </div>
+          <p class="muted small" id="goal-summary"></p>
+        </div>
+
+        <div class="card stats-card" aria-labelledby="stats-heading">
+          <h2 id="stats-heading">Activity & Streak</h2>
+          <div class="stats-grid">
+            <div>
+              <div class="stat-value" id="weekly-minutes">0</div>
+              <div class="muted small">Minutes this week</div>
+            </div>
+            <div>
+              <div class="stat-value" id="workout-count">0</div>
+              <div class="muted small">Workouts this week</div>
+            </div>
+            <div>
+              <div class="stat-value" id="current-streak">0</div>
+              <div class="muted small">Day streak</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="main-grid">
+        <aside class="card presets" aria-labelledby="presets-heading">
+          <h2 id="presets-heading">Exercise Presets</h2>
+          <ul id="preset-list" class="preset-list" aria-live="polite"></ul>
+          <form id="preset-form" class="preset-form" aria-label="Add preset">
+            <input
+              id="preset-name"
+              placeholder="Preset name"
+              aria-label="preset name"
+            />
+            <input
+              id="preset-default"
+              type="number"
+              min="1"
+              max="1440"
+              placeholder="Default minutes (optional)"
+              inputmode="numeric"
+              aria-label="Default preset minutes (optional)"
+            />
+            <button class="btn" type="submit">Add</button>
+          </form>
+          <p class="muted small">
+            Presets speed up logging. Edit or remove any preset.
+          </p>
+        </aside>
+
+        <section class="card log-card" aria-labelledby="log-heading">
+          <h2 id="log-heading">Log Workout</h2>
+          <form id="workout-form" class="workout-form" aria-label="Log workout">
+            <div class="row">
+              <label for="workout-date">Date</label>
+              <input id="workout-date" type="date" required />
+            </div>
+
+            <div id="exercises-container">
+              <!-- exercise rows inserted here -->
+            </div>
+
+            <div class="form-actions">
+              <button id="add-exercise" class="btn secondary" type="button">
+                + Add exercise
+              </button>
+              <div>
+                <button class="btn primary" type="submit">Save Workout</button>
+                <button id="clear-form" class="btn" type="button">Clear</button>
+              </div>
+            </div>
+          </form>
+          <div id="log-empty" class="empty muted">
+            Start by adding a workout — it will appear in the list to the right.
+          </div>
+        </section>
+
+        <section class="card history-card" aria-labelledby="history-heading">
+          <h2 id="history-heading">Recent Workouts</h2>
+          <div id="history-list" class="history-list" aria-live="polite"></div>
+        </section>
+      </section>
+
+      <section class="card summary-card" aria-labelledby="summary-heading">
+        <h2 id="summary-heading">Weekly Summary</h2>
+        <div
+          id="week-chart"
+          class="week-chart"
+          role="group"
+          aria-label="Weekly activity chart"
+        ></div>
+        <p class="muted small" id="summary-note">
+          View your last 7 days of activity. Click a bar to see that day's
+          workouts.
+        </p>
+      </section>
+
+      <footer class="app-footer muted small">
+        Data stored locally in your browser's localStorage. No network required.
+      </footer>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

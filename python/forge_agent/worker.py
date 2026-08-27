@@ -123,6 +123,7 @@ class MockAgent:
     workspace_fingerprint: str | None = None
     verification_checks: list[dict[str, Any]] = field(default_factory=list)
     pending_call: ToolCall | None = None
+    pending_calls: list[ToolCall] = field(default_factory=list)
     pending_assistant_message: dict[str, Any] = field(default_factory=dict)
     turn_count: int = 0
     repair_attempts: int = 0
@@ -233,7 +234,8 @@ class MockAgent:
             if self.repair_attempts == 0:
                 self.repair_attempts = 1
             self._append_message(reply.raw_message or {"role": "assistant", "content": reply.text, "tool_calls": [{"id": call.id, "type": "function", "function": {"name": call.name, "arguments": json.dumps(call.arguments)}} for call in reply.tool_calls]})
-            self.pending_call = reply.tool_calls[0]
+            self.pending_calls = list(reply.tool_calls)
+            self.pending_call = self.pending_calls[0]
             self.pending_assistant_message = reply.raw_message or {"role": "assistant", "tool_calls": [{"id": call.id, "type": "function", "function": {"name": call.name, "arguments": json.dumps(call.arguments)}} for call in reply.tool_calls]}
             tool_name = self.pending_call.name
             if tool_name not in TOOL_RISKS:
@@ -272,8 +274,16 @@ class MockAgent:
         if self.repair_attempts > 1:
             repair_events.append(event("agent.repair", self.session_id, attempt=self.repair_attempts, maxAttempts=4, strategy="deep-thinking" if self.repair_attempts == 4 else "alternate", status="succeeded", reason="The next approved tool step completed after a bounded repair attempt."))
         self.repair_attempts = 0
+        current_call = self.pending_call
         result_content = payload.get("output")
-        self._append_message({"role": "tool", "tool_call_id": self.pending_call.id, "content": json.dumps(result_content, ensure_ascii=False)})
+        self._append_message({"role": "tool", "tool_call_id": current_call.id, "content": json.dumps(result_content, ensure_ascii=False)})
+        self.pending_calls = self.pending_calls[1:]
+        if self.pending_calls:
+            self.pending_call = self.pending_calls[0]
+            tool_name = self.pending_call.name
+            if tool_name not in TOOL_RISKS:
+                return repair_events + [event("session.complete", self.session_id, status="failed", summary=f"The provider requested unsupported tool {tool_name}.", changedFiles=self.changed_files, checks=self.verification_checks)]
+            return repair_events + [event("tool.proposal", self.session_id, tool=tool_name, risk=TOOL_RISKS[tool_name], arguments=self.pending_call.arguments, reason="The configured provider selected this tool for the current task.")]
         self.pending_call = None
         self.pending_assistant_message = {}
         return repair_events + self.provider_turn()
@@ -291,6 +301,7 @@ class MockAgent:
         result_content = payload.get("error")
         if self.pending_call is not None:
             self._append_message({"role": "tool", "tool_call_id": self.pending_call.id, "content": json.dumps(result_content, ensure_ascii=False)})
+            self.pending_calls = []
             self.pending_call = None
             self.pending_assistant_message = {}
         return events + self.provider_turn()
