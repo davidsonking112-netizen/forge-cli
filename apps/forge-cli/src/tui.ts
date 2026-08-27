@@ -99,6 +99,13 @@ export class FullScreenTui {
   private checks: SessionCompleteEvent["checks"] = [];
   private executionState: AgentStateEvent | undefined;
   private executionGraph: AgentGraphEvent | undefined;
+  private contextLayers = {
+    architectureModules: 0,
+    acceptanceItems: 0,
+    symbolSlices: 0,
+    failureItems: 0,
+    attemptItems: 0,
+  };
   private sessionId = "";
   private workspace = "";
   private provider = "";
@@ -171,6 +178,31 @@ export class FullScreenTui {
       this.workspace = event.workspace;
       this.provider = event.provider;
       this.policy = `${event.policy}${event.profile ? ` / ${event.profile}` : ""}`;
+      const contextPack =
+        event.context &&
+        typeof event.context === "object" &&
+        "contextPack" in event.context
+          ? (
+              event.context as {
+                contextPack?: {
+                  architectureMap: { modules: unknown[] };
+                  acceptanceMap: unknown[];
+                  symbolSlices: unknown[];
+                  failureContext: unknown[];
+                  attemptHistory: unknown[];
+                };
+              }
+            ).contextPack
+          : undefined;
+      if (contextPack) {
+        this.contextLayers = {
+          architectureModules: contextPack.architectureMap.modules.length,
+          acceptanceItems: contextPack.acceptanceMap.length,
+          symbolSlices: contextPack.symbolSlices.length,
+          failureItems: contextPack.failureContext.length,
+          attemptItems: contextPack.attemptHistory.length,
+        };
+      }
       this.runStatus = "running";
       this.addActivity(
         time,
@@ -529,6 +561,9 @@ export class FullScreenTui {
       .join(" | ");
     this.writeLine(
       `${this.fit(scratch || "No scratchpad entries yet.", inner)}`,
+    );
+    this.writeLine(
+      `${ANSI.bold}Context retrieval${ANSI.reset}: contract + architecture ${this.contextLayers.architectureModules} modules | acceptance ${this.contextLayers.acceptanceItems} | symbols ${this.contextLayers.symbolSlices} | failures ${this.contextLayers.failureItems} | prior attempts ${this.contextLayers.attemptItems}`,
     );
   }
 

@@ -1073,6 +1073,82 @@ async function auditCommand(args: ParsedArgs): Promise<number> {
             policy: event.policy,
             profile: event.profile ?? null,
             workspaceFingerprint: event.workspaceFingerprint ?? null,
+            contextLayers:
+              event.context &&
+              typeof event.context === "object" &&
+              "contextPack" in event.context
+                ? {
+                    architectureModules: Array.isArray(
+                      (
+                        event.context as {
+                          contextPack?: {
+                            architectureMap?: { modules?: unknown[] };
+                          };
+                        }
+                      ).contextPack?.architectureMap?.modules,
+                    )
+                      ? (
+                          event.context as {
+                            contextPack: {
+                              architectureMap: { modules: unknown[] };
+                            };
+                          }
+                        ).contextPack.architectureMap.modules.length
+                      : 0,
+                    acceptanceItems: Array.isArray(
+                      (
+                        event.context as {
+                          contextPack?: { acceptanceMap?: unknown[] };
+                        }
+                      ).contextPack?.acceptanceMap,
+                    )
+                      ? (
+                          event.context as {
+                            contextPack: { acceptanceMap: unknown[] };
+                          }
+                        ).contextPack.acceptanceMap.length
+                      : 0,
+                    symbolSlices: Array.isArray(
+                      (
+                        event.context as {
+                          contextPack?: { symbolSlices?: unknown[] };
+                        }
+                      ).contextPack?.symbolSlices,
+                    )
+                      ? (
+                          event.context as {
+                            contextPack: { symbolSlices: unknown[] };
+                          }
+                        ).contextPack.symbolSlices.length
+                      : 0,
+                    failureItems: Array.isArray(
+                      (
+                        event.context as {
+                          contextPack?: { failureContext?: unknown[] };
+                        }
+                      ).contextPack?.failureContext,
+                    )
+                      ? (
+                          event.context as {
+                            contextPack: { failureContext: unknown[] };
+                          }
+                        ).contextPack.failureContext.length
+                      : 0,
+                    attemptItems: Array.isArray(
+                      (
+                        event.context as {
+                          contextPack?: { attemptHistory?: unknown[] };
+                        }
+                      ).contextPack?.attemptHistory,
+                    )
+                      ? (
+                          event.context as {
+                            contextPack: { attemptHistory: unknown[] };
+                          }
+                        ).contextPack.attemptHistory.length
+                      : 0,
+                  }
+                : null,
           };
         case "agent.text":
           return {
@@ -1331,11 +1407,20 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
     }> = [];
     let provider: string | undefined;
     let profile: string | undefined;
+    let contextPack: unknown = null;
     for (const event of session.events) {
       counts[event.type] = (counts[event.type] ?? 0) + 1;
       if (event.type === "session.start") {
         provider = event.provider;
         profile = event.profile;
+        if (
+          event.context &&
+          typeof event.context === "object" &&
+          "contextPack" in event.context
+        )
+          contextPack = redactValue(
+            (event.context as { contextPack: unknown }).contextPack,
+          );
       }
       if (event.type === "tool.result") {
         const metric = (toolMetrics[event.tool] ??= {
@@ -1386,6 +1471,7 @@ async function inspectCommand(args: ParsedArgs): Promise<number> {
           resumeCount: session.resumeCount,
           workspaceFingerprint: session.workspaceFingerprint,
           recovery: session.recovery,
+          contextPack,
           scratchpad: session.scratchpad,
           checklist: session.checklist,
           plan: session.plan,
@@ -1769,6 +1855,7 @@ async function contextCommand(args: ParsedArgs): Promise<number> {
           packageManager: context.packageManager,
           changedFiles: context.changedFiles,
           contextStats: context.stats,
+          contextPack: context.contextPack,
           relevantFiles: context.relevantFiles.map(
             ({ path: filePath, bytes, symbols, reasons }) => ({
               path: filePath,

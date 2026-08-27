@@ -191,6 +191,7 @@ test("full-screen TUI renders live session state across tabs", () => {
   assert.match(overview, /workspace\.read/);
   assert.match(overview, /Execution phase targeted-verify/);
   assert.match(overview, /Dependency graph 0\/1/);
+  assert.match(overview, /Context retrieval/);
 
   input.emit("2");
   assert.match(output.text(), /Improve the application safely/);

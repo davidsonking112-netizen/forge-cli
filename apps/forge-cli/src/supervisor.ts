@@ -24,8 +24,11 @@ import { SessionStore, type SessionRecord } from "./sessions.js";
 import {
   buildRepositoryContext,
   fingerprintRepositoryContext,
+  type ContextAttempt,
+  type ContextFailure,
 } from "./context.js";
 import type { PolicyPack } from "./policy.js";
+import { redactValue } from "./redaction.js";
 import { getAutonomyProfile, type AutonomyProfileName } from "./profiles.js";
 import { acquireWorkspaceLock } from "./locks.js";
 import {
@@ -51,6 +54,8 @@ export interface RunOptions {
   policyPack?: PolicyPack;
   autonomyProfile?: AutonomyProfileName;
   recovery?: RecoveryAssessment;
+  failureContext?: ContextFailure[];
+  attemptHistory?: ContextAttempt[];
   signal?: AbortSignal;
   revokeApprovalScope?: () => boolean;
   onEvent?: (event: ForgeEvent) => void;
@@ -172,6 +177,15 @@ export class ForgeSupervisor {
     const repositoryContext = await buildRepositoryContext(
       workspace,
       options.prompt,
+      undefined,
+      {
+        ...(options.failureContext
+          ? { failureContext: options.failureContext }
+          : {}),
+        ...(options.attemptHistory
+          ? { attemptHistory: options.attemptHistory }
+          : {}),
+      },
     );
     const workspaceFingerprint =
       fingerprintRepositoryContext(repositoryContext);
@@ -200,6 +214,13 @@ export class ForgeSupervisor {
     let completionRejections = 0;
     let approvalMode: "safe" | "session-approve" | "unsafe" = policy.mode;
     let approvalScope: ApprovalScope | undefined;
+    const failureContext: ContextFailure[] = [
+      ...(options.failureContext ?? []),
+    ].slice(-8);
+    const attemptHistory: ContextAttempt[] = [
+      ...(options.attemptHistory ?? []),
+    ].slice(-8);
+    const observedChangedFiles = new Set(repositoryContext.changedFiles);
 
     const send = (event: ForgeEvent): void => {
       if (workerError) throw workerError;
@@ -353,10 +374,30 @@ export class ForgeSupervisor {
             const blocked = stateMachine.block(gate.reason);
             await emit(this.executionStateEvent(session.id, blocked));
             if (completionRejections <= 3) {
+              attemptHistory.push({
+                strategy: "completion-gate-repair",
+                reason: gate.reason.slice(0, 1_000),
+                outcome: "blocked",
+              });
+              while (attemptHistory.length > 8) attemptHistory.shift();
+              repositoryContext.contextPack.attemptHistory = [
+                ...attemptHistory,
+              ];
+              const recentFailures = failureContext
+                .slice(-3)
+                .map(
+                  (failure) =>
+                    `${failure.tool}${failure.command ? ` ${failure.command}` : ""}: ${failure.output}`,
+                )
+                .join(" | ");
+              const recentAttempts = attemptHistory
+                .slice(-3)
+                .map((attempt) => `${attempt.strategy}: ${attempt.reason}`)
+                .join(" | ");
               send({
                 ...createEnvelope("user.prompt", session.id),
                 type: "user.prompt",
-                prompt: `Forge rejected the completion claim: ${gate.reason} Continue from the last verified checkpoint. Perform the missing bounded milestone or verification step; do not claim done until the supervisor evidence satisfies the completion gates.`,
+                prompt: `Forge rejected the completion claim: ${gate.reason} Continue from the last verified checkpoint. Perform the missing bounded milestone or verification step; do not claim done until the supervisor evidence satisfies the completion gates. Recent failure context: ${recentFailures || "none"}. Previous repair strategies to avoid repeating: ${recentAttempts || "none"}.`,
               });
               continue;
             }
@@ -504,6 +545,66 @@ export class ForgeSupervisor {
             durationMs: result.durationMs,
           };
           await emit(resultEvent);
+          if (
+            resultEvent.ok &&
+            resultEvent.output &&
+            typeof resultEvent.output === "object"
+          ) {
+            const output = resultEvent.output as Record<string, unknown>;
+            if (Array.isArray(output.files))
+              output.files.slice(0, 200).forEach((file) => {
+                if (
+                  typeof file === "string" &&
+                  file.length <= 500 &&
+                  !path.isAbsolute(file)
+                )
+                  observedChangedFiles.add(file.replaceAll("\\", "/"));
+              });
+          }
+          if (!resultEvent.ok) {
+            const output =
+              resultEvent.output && typeof resultEvent.output === "object"
+                ? (resultEvent.output as Record<string, unknown>)
+                : {};
+            const command =
+              typeof output.command === "string"
+                ? output.command
+                : event.tool === "process.run" &&
+                    typeof event.arguments.command === "string"
+                  ? event.arguments.command
+                  : undefined;
+            const failureOutput = [
+              resultEvent.error?.message,
+              typeof output.output === "string" ? output.output : undefined,
+            ]
+              .filter((value): value is string => Boolean(value))
+              .join("\n");
+            const failure: ContextFailure = {
+              tool: resultEvent.tool,
+              ...(command ? { command } : {}),
+              ...(typeof output.exitCode === "number"
+                ? { exitCode: output.exitCode }
+                : {}),
+              output: String(redactValue(failureOutput || "Tool failed")).slice(
+                0,
+                20_000,
+              ),
+              changedFiles: [...observedChangedFiles].slice(0, 200),
+            };
+            failureContext.push(failure);
+            while (failureContext.length > 8) failureContext.shift();
+            attemptHistory.push({
+              strategy: "bounded-repair",
+              reason: failure.output.slice(0, 1_000),
+              outcome:
+                resultEvent.error?.code === "APPROVAL_DENIED"
+                  ? "blocked"
+                  : "failed",
+            });
+            while (attemptHistory.length > 8) attemptHistory.shift();
+            repositoryContext.contextPack.failureContext = [...failureContext];
+            repositoryContext.contextPack.attemptHistory = [...attemptHistory];
+          }
           const resultSnapshot = stateMachine.observe(resultEvent);
           if (resultSnapshot)
             await emit(this.executionStateEvent(session.id, resultSnapshot));

@@ -1713,8 +1713,139 @@ test("dependency graph persists and is exposed by forge inspect", async () => {
       inspected.executionGraph.steps[0].id,
       record.executionGraph.steps[0].id,
     );
+    assert.equal(
+      typeof inspected.contextPack.projectContract.language,
+      "string",
+    );
+    assert.ok(Array.isArray(inspected.contextPack.acceptanceMap));
   } finally {
     await rm(workspace, { recursive: true, force: true });
     await rm(stateHome, { recursive: true, force: true });
+  }
+});
+
+test("context engine builds a hierarchical relevance pack instead of only larger file context", async () => {
+  const directory = await tempWorkspace();
+  try {
+    await mkdir(path.join(directory, "src"));
+    await mkdir(path.join(directory, "tests"));
+    await writeFile(
+      path.join(directory, "package.json"),
+      JSON.stringify({
+        scripts: { test: "node --test", build: "tsc -p tsconfig.json" },
+        dependencies: { react: "18.0.0" },
+      }),
+    );
+    await writeFile(
+      path.join(directory, "src", "profile.ts"),
+      "import { saveProfile } from './persistence';\nexport function updateProfile(name: string) { return saveProfile(name); }\n",
+    );
+    await writeFile(
+      path.join(directory, "src", "persistence.ts"),
+      "export function saveProfile(name: string) { localStorage.setItem('profile', name); }\n",
+    );
+    await writeFile(
+      path.join(directory, "src", "routes.js"),
+      "const app = {}; app.get('/profile', () => {});\n",
+    );
+    await writeFile(
+      path.join(directory, "tests", "profile.test.ts"),
+      "export function profileTest() { return true; }\n",
+    );
+    const context = await buildRepositoryContext(
+      directory,
+      "Implement profile persistence and verify profile behavior",
+      { ...DEFAULT_CONTEXT_BUDGET, maxRelevantFiles: 12, maxSymbolSlices: 8 },
+      {
+        failureContext: [
+          {
+            tool: "process.run",
+            command: "npm test",
+            exitCode: 1,
+            output: "profile assertion failed",
+            changedFiles: ["src/profile.ts"],
+          },
+        ],
+        attemptHistory: [
+          {
+            strategy: "alternate",
+            reason: "Focused test failed",
+            outcome: "failed",
+          },
+        ],
+      },
+    );
+    assert.equal(context.contextPack.projectContract.framework, "react");
+    assert.ok(
+      context.contextPack.projectContract.testCommands.some(
+        (command) => command.join(" ") === "npm run test",
+      ),
+    );
+    assert.ok(context.contextPack.architectureMap.directories.includes("src"));
+    assert.ok(
+      context.contextPack.architectureMap.modules.some(
+        (module) => module.path === "src/profile.ts",
+      ),
+    );
+    assert.ok(
+      context.contextPack.architectureMap.modules.some((module) =>
+        module.routes.includes("GET /profile"),
+      ),
+    );
+    assert.ok(
+      context.contextPack.acceptanceMap[0].files.includes("src/profile.ts"),
+    );
+    assert.ok(
+      context.contextPack.symbolSlices.some(
+        (slice) => slice.symbol === "updateProfile",
+      ),
+    );
+    assert.equal(context.contextPack.failureContext[0].exitCode, 1);
+    assert.equal(context.contextPack.attemptHistory[0].strategy, "alternate");
+    assert.ok(
+      JSON.stringify(context.contextPack).length <
+        DEFAULT_CONTEXT_BUDGET.maxTotalChars,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("supervisor carries bounded failure context and attempt history into provider context", async () => {
+  const directory = await tempWorkspace();
+  try {
+    const events = [];
+    const result = await new ForgeSupervisor().run({
+      prompt: "Create file history.txt",
+      workspace: directory,
+      approveAll: true,
+      failureContext: [
+        {
+          tool: "process.run",
+          command: "npm test",
+          exitCode: 1,
+          output: "assertion failed token=should-not-leak",
+          changedFiles: ["src/history.ts"],
+        },
+      ],
+      attemptHistory: [
+        {
+          strategy: "focused-check",
+          reason: "The focused check failed",
+          outcome: "failed",
+        },
+      ],
+      onEvent: (event) => events.push(event),
+    });
+    assert.equal(result.status, "completed");
+    const start = events.find((event) => event.type === "session.start");
+    assert.equal(start?.context?.contextPack?.failureContext?.[0]?.exitCode, 1);
+    assert.equal(
+      start?.context?.contextPack?.attemptHistory?.[0]?.strategy,
+      "focused-check",
+    );
+    assert.doesNotMatch(JSON.stringify(start?.context), /should-not-leak/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });

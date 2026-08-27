@@ -114,6 +114,29 @@ def extract_graph_proposal(text: str) -> list[dict[str, Any]] | None:
     return None
 
 
+def hierarchical_context_summary(context: dict[str, Any], max_chars: int) -> str:
+    pack = context.get("contextPack") if isinstance(context.get("contextPack"), dict) else {}
+    if not pack:
+        return json.dumps(context, ensure_ascii=False, separators=(",", ":"))[:max_chars]
+    contract = pack.get("projectContract", {})
+    architecture = pack.get("architectureMap", {})
+    selected = {
+        "projectContract": contract,
+        "architectureMap": {
+            "directories": architecture.get("directories", [])[:128] if isinstance(architecture, dict) else [],
+            "modules": architecture.get("modules", [])[:64] if isinstance(architecture, dict) else [],
+            "edges": architecture.get("edges", [])[:256] if isinstance(architecture, dict) else [],
+        },
+        "acceptanceMap": pack.get("acceptanceMap", [])[:32],
+        "symbolSlices": pack.get("symbolSlices", [])[:96],
+        "failureContext": pack.get("failureContext", [])[:16],
+        "attemptHistory": pack.get("attemptHistory", [])[:16],
+        "changedFiles": context.get("changedFiles", [])[:200],
+        "verificationCommands": context.get("verificationCommands", [])[:8],
+    }
+    return json.dumps(selected, ensure_ascii=False, separators=(",", ":"))[:max_chars]
+
+
 def high_risk_goal(prompt: str) -> bool:
     return bool(re.search(r"\b(create|write|edit|modify|delete|remove|run|execute|commit|push|deploy|install|migrate)\b", prompt, re.IGNORECASE))
 
@@ -198,7 +221,7 @@ class MockAgent:
             if self.provider is not None and os.environ.get("FORGE_PROVIDER", "mock").lower() not in {"mock", "test"}:
                 context = payload.get("context") or {}
                 horizon_chars = bounded_int("FORGE_MAX_HORIZON_CHARS", 60_000, 8_000, 100_000)
-                context_summary = json.dumps(context, ensure_ascii=False, separators=(",", ":"))[:horizon_chars]
+                context_summary = hierarchical_context_summary(context, horizon_chars)
                 if os.environ.get("FORGE_MULTI_AGENT", "0") == "1":
                     profile_name = os.environ.get("FORGE_COST_PROFILE", "balanced").lower()
                     profile = COST_PROFILES.get(profile_name, COST_PROFILES["balanced"])
