@@ -145,6 +145,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(delegations), 2)
         self.assertTrue(all(event["status"] == "completed" for event in delegations))
         self.assertTrue(all(event["budget"]["profile"] == "balanced" for event in delegations))
+        self.assertTrue(all("error" not in event for event in delegations))
         self.assertEqual(delegations[-1]["budget"]["usedRoles"], 2)
         self.assertTrue(any(event["type"] == "agent.checklist" for event in events))
         self.assertTrue(any(event["type"] == "session.complete" for event in events))

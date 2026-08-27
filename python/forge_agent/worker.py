@@ -191,7 +191,11 @@ class MockAgent:
                     )
                     budget = {"profile": profile_name if profile_name in COST_PROFILES else "balanced", "plannedRoles": len(roles), "usedRoles": used_roles, "plannedTurns": bounded_int("FORGE_MAX_TOTAL_TURNS", profile["max_total_turns"], 1, 16), "usedTurns": used_turns, "contextChars": min(len(context_summary), bounded_int("FORGE_MAX_AGENT_CONTEXT_CHARS", profile["max_context_chars"], 4_000, 100_000)), "outputChars": output_chars, "skippedRoles": skipped}
                     responses = [event("agent.checklist", self.session_id, items=task_checklist("plan", completed={"inspect"}))]
-                    responses.extend(event("agent.delegation", self.session_id, role=result.role, status=result.status, turns=result.turns, text=result.text, error=result.error, budget=budget) for result in report.results)
+                    for result in report.results:
+                        delegation_payload = {"role": result.role, "status": result.status, "turns": result.turns, "text": result.text, "budget": budget}
+                        if result.error is not None:
+                            delegation_payload["error"] = result.error
+                        responses.append(event("agent.delegation", self.session_id, **delegation_payload))
                     responses.append(event("agent.checklist", self.session_id, items=task_checklist("summarize", completed={"inspect", "plan", "verify"})))
                     responses.append(event("agent.text", self.session_id, text=report.merged_summary or "The bounded specialist team completed without a merged summary."))
                     responses.append(event("session.complete", self.session_id, status="completed" if report.merged_summary else "failed", summary="Bounded multi-agent analysis completed. No tools were authorized by delegated specialists." if report.merged_summary else "Bounded multi-agent analysis produced no verified summary.", changedFiles=self.changed_files, checks=self.verification_checks))
