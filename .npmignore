@@ -1,0 +1,20 @@
+# Source-control and local development metadata
+.git/
+.github/
+node_modules/
+
+# Python generated artifacts
+**/__pycache__/
+**/*.py[cod]
+**/*.so
+.pytest_cache/
+
+# Test and coverage output
+coverage/
+.nyc_output/
+*.log
+
+# Local build and benchmark artifacts
+.tmp/
+forge-wheel-check/
+benchmarks/results/

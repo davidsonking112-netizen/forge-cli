@@ -7,6 +7,7 @@ import type {
   ToolName,
 } from "../../../packages/protocol/src/index.js";
 import { applyUnifiedFilePatch, parseUnifiedDiff } from "./diff.js";
+import { forgeStateDirectory } from "./paths.js";
 
 export interface ToolResult {
   ok: boolean;
@@ -200,12 +201,7 @@ export class WorkspaceTools {
 
   public constructor(
     public readonly root: string,
-    checkpointRoot = path.join(
-      process.env.XDG_STATE_HOME ??
-        path.join(process.env.HOME ?? process.cwd(), ".local", "state"),
-      "forge",
-      "checkpoints",
-    ),
+    checkpointRoot = path.join(forgeStateDirectory(), "checkpoints"),
   ) {
     this.checkpointRoot = checkpointRoot;
   }
@@ -930,7 +926,9 @@ export class WorkspaceTools {
     try {
       await serverReady;
       if (signal?.aborted) throw new Error("Browser smoke cancelled");
-      const browser = process.platform === "win32" ? "msedge" : "chromium";
+      const browser =
+        process.env.FORGE_BROWSER ??
+        (process.platform === "win32" ? "msedge" : "chromium");
       const url = `http://127.0.0.1:${port}/${indexPath.split("/").map(encodeURIComponent).join("/")}`;
       const browserArgs = [
         "--headless",

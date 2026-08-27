@@ -9,7 +9,7 @@
   "files": [
     "bin/forge.mjs",
     "dist/",
-    "python/forge_agent/",
+    "python/forge_agent/*.py",
     "python/pyproject.toml",
     "README.md",
     "docs/ERROR_CODES.md"
@@ -23,9 +23,9 @@
     "prepare": "npm run build",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test tests/*.test.mjs && python3 -m unittest discover -s python/tests -p 'test_*.py'",
+    "test": "npm run build && node scripts/run-tests.mjs",
     "format:check": "npx prettier --check .",
-    "release:check": "npm run format:check && npm run typecheck && npm test && python3 -m pip wheel ./python --no-deps --no-cache-dir -w /tmp/forge-wheel-check",
+    "release:check": "node scripts/release-check.mjs",
     "forge": "node dist/apps/forge-cli/src/main.js"
   },
   "devDependencies": {

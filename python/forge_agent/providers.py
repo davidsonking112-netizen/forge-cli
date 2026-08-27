@@ -43,6 +43,11 @@ class Provider(Protocol):
 
 
 PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
+    "requesty": {
+        "base_url": "https://router.requesty.ai/v1",
+        "key_envs": ("REQUESTY_API_KEY",),
+        "model": "openai/gpt-4o-mini",
+    },
     "openrouter": {
         "base_url": "https://openrouter.ai/api/v1",
         "key_envs": ("OPENROUTER_API_KEY",),

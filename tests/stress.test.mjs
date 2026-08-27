@@ -503,6 +503,8 @@ test("v0.9 CLI exposes recovery, change-set, verification, policy, extension, MC
       env: { ...process.env, FORGE_API_KEY: "must-not-appear" },
     });
     assert.equal(providers.status, 0);
+    assert.match(providers.stdout, /requesty/);
+    assert.match(providers.stdout, /REQUESTY_API_KEY/);
     assert.match(providers.stdout, /openrouter/);
     assert.match(providers.stdout, /Set FORGE_PROVIDER=openai-compatible/);
     assert.doesNotMatch(providers.stdout, /must-not-appear/);

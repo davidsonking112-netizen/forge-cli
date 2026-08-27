@@ -8,6 +8,7 @@ Forge includes named presets for common OpenAI-compatible endpoints. A preset se
 
 | `FORGE_PROVIDER`                          | Credential variable                                               | Default base URL                                          | Default model             | Notes                                                           |
 | ----------------------------------------- | ----------------------------------------------------------------- | --------------------------------------------------------- | ------------------------- | --------------------------------------------------------------- |
+| `requesty`                                | `REQUESTY_API_KEY`                                                | `https://router.requesty.ai/v1`                           | `openai/gpt-4o-mini`      | Requesty OpenAI-compatible router                               |
 | `openai` or `openai-compatible`           | `FORGE_API_KEY` or `OPENAI_API_KEY`                               | `https://api.openai.com/v1`                               | `gpt-4.1-mini`            | Generic OpenAI-compatible path                                  |
 | `openrouter`                              | `OPENROUTER_API_KEY`                                              | `https://openrouter.ai/api/v1`                            | `openai/gpt-4o-mini`      | Use a model ID available through OpenRouter                     |
 | `groq`                                    | `GROQ_API_KEY`                                                    | `https://api.groq.com/openai/v1`                          | `llama-3.3-70b-versatile` | Use a currently supported Groq model                            |
@@ -17,6 +18,22 @@ Forge includes named presets for common OpenAI-compatible endpoints. A preset se
 The generic path is intentionally extensible. Any service that implements the OpenAI-compatible `/chat/completions` contract can be used by setting `FORGE_PROVIDER=openai-compatible`, `FORGE_API_KEY`, `FORGE_BASE_URL`, and `FORGE_MODEL`. This gives users a route for additional providers without requiring Forge to embed provider-specific logic or trust remote instructions.
 
 ## Examples
+
+```bash
+# Requesty
+export FORGE_PROVIDER=requesty
+export REQUESTY_API_KEY='your-requesty-key'
+export FORGE_MODEL='openai/gpt-4o-mini'
+forge run --prompt 'Review the repository and propose safe improvements'
+```
+
+```powershell
+# Requesty on Windows PowerShell
+$env:FORGE_PROVIDER = "requesty"
+$env:REQUESTY_API_KEY = "your-requesty-key"
+$env:FORGE_MODEL = "openai/gpt-4o-mini"
+forge run --prompt "Review the repository and propose safe improvements"
+```
 
 ```bash
 # OpenRouter
@@ -66,10 +83,12 @@ The named presets are configuration conveniences, not guarantees that a particul
 
 ## References
 
-1. [Google Gemini OpenAI compatibility](https://ai.google.dev/gemini-api/docs/openai)
-2. [OpenRouter Quickstart](https://openrouter.ai/docs/quickstart)
-3. [Groq OpenAI compatibility](https://console.groq.com/docs/openai)
-4. [xAI Inference REST API](https://docs.x.ai/developers/rest-api-reference/inference)
+1. [Requesty Quickstart](https://docs.requesty.ai/quickstart)
+2. [Requesty Create Chat Completion](https://docs.requesty.ai/api-reference/endpoint/chat-completions-create)
+3. [Google Gemini OpenAI compatibility](https://ai.google.dev/gemini-api/docs/openai)
+4. [OpenRouter Quickstart](https://openrouter.ai/docs/quickstart)
+5. [Groq OpenAI compatibility](https://console.groq.com/docs/openai)
+6. [xAI Inference REST API](https://docs.x.ai/developers/rest-api-reference/inference)
 
 ## Long-horizon implementation loop
 

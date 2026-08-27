@@ -32,6 +32,10 @@ import {
 } from "../dist/apps/forge-cli/src/main.js";
 import { DaytonaClient } from "../dist/apps/forge-cli/src/daytona.js";
 import {
+  forgeConfigDirectory,
+  forgeStateDirectory,
+} from "../dist/apps/forge-cli/src/paths.js";
+import {
   createEnvelope,
   isForgeEvent,
   parseForgeEvent,
@@ -1044,6 +1048,41 @@ test("direct CLI entrypoint detection handles Windows paths", () => {
   assert.equal(
     isDirectInvocation("file:///tmp/forge/main.js", undefined),
     false,
+  );
+});
+
+test("Forge config and state paths are Windows-aware and overrideable", () => {
+  const windowsEnvironment = {
+    APPDATA: "C:\\Users\\Keji\\AppData\\Roaming",
+    LOCALAPPDATA: "C:\\Users\\Keji\\AppData\\Local",
+  };
+  assert.equal(
+    forgeConfigDirectory("win32", windowsEnvironment, "C:\\Users\\Keji"),
+    path.join("C:\\Users\\Keji\\AppData\\Roaming", "forge"),
+  );
+  assert.equal(
+    forgeStateDirectory("win32", windowsEnvironment, "C:\\Users\\Keji"),
+    path.join("C:\\Users\\Keji\\AppData\\Local", "forge"),
+  );
+  assert.equal(
+    forgeConfigDirectory(
+      "win32",
+      { FORGE_CONFIG_HOME: "D:\\ForgeConfig" },
+      "C:\\Users\\Keji",
+    ),
+    path.join("D:\\ForgeConfig", "forge"),
+  );
+  assert.equal(
+    forgeStateDirectory(
+      "linux",
+      { XDG_STATE_HOME: "/tmp/forge-state" },
+      "/home/keji",
+    ),
+    path.join("/tmp/forge-state", "forge"),
+  );
+  assert.equal(
+    forgeConfigDirectory("linux", {}, "/home/keji"),
+    path.join("/home/keji", ".config", "forge"),
   );
 });
 

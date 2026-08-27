@@ -1036,6 +1036,7 @@ export class ForgeSupervisor {
         [
           "FORGE_PROVIDER",
           "FORGE_API_KEY",
+          "REQUESTY_API_KEY",
           "OPENAI_API_KEY",
           "OPENROUTER_API_KEY",
           "GROQ_API_KEY",

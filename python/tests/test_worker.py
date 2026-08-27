@@ -366,6 +366,7 @@ class WorkerTests(unittest.TestCase):
 
     def test_provider_presets_select_supported_endpoints_without_leaking_keys(self):
         cases = [
+            ("requesty", "REQUESTY_API_KEY", "https://router.requesty.ai/v1"),
             ("openrouter", "OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"),
             ("groq", "GROQ_API_KEY", "https://api.groq.com/openai/v1"),
             ("gemini", "GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai"),

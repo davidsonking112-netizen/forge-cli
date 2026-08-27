@@ -1,8 +1,8 @@
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { buildRepositoryContext, type RepositoryContext } from "./context.js";
+import { forgeStateDirectory } from "./paths.js";
 
 const MAX_INDEX_BYTES = 1_000_000;
 const MAX_INDEX_FILES = 2_000;
@@ -39,11 +39,7 @@ export interface RepositoryIndex {
 }
 
 function stateDirectory(): string {
-  return path.join(
-    process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"),
-    "forge",
-    "indexes",
-  );
+  return path.join(forgeStateDirectory(), "indexes");
 }
 
 function indexPath(root: string): string {

@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { redactValue } from "./redaction.js";
+import { forgeStateDirectory } from "./paths.js";
 import type {
   AgentStateEvent,
   AgentGraphEvent,
@@ -64,12 +65,7 @@ export class SessionStore {
   private readonly directory: string;
 
   public constructor(
-    baseDirectory = path.join(
-      process.env.XDG_STATE_HOME ??
-        path.join(process.env.HOME ?? process.cwd(), ".local", "state"),
-      "forge",
-      "sessions",
-    ),
+    baseDirectory = path.join(forgeStateDirectory(), "sessions"),
   ) {
     this.directory = baseDirectory;
   }

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { forgeStateDirectory } from "./paths.js";
 
 const STALE_LOCK_MS = 24 * 60 * 60 * 1_000;
 
@@ -29,12 +30,7 @@ interface LockRecord {
 }
 
 function lockDirectory(): string {
-  return path.join(
-    process.env.XDG_STATE_HOME ??
-      path.join(process.env.HOME ?? process.cwd(), ".local", "state"),
-    "forge",
-    "locks",
-  );
+  return path.join(forgeStateDirectory(), "locks");
 }
 
 export function workspaceLockPath(workspace: string): string {

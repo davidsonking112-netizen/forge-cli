@@ -17,7 +17,7 @@ Exit code `0` means success, `1` means an attempted operation failed, `2` means 
 
 ## Install with npm from GitHub
 
-The public repository can be installed globally through npm without first cloning it. This installs the repository package, runs its safe build preparation step, and exposes the `forge` executable:
+If Git is installed and available on `PATH`, the repository package can be installed globally through npm:
 
 ```powershell
 npm install --global git+https://github.com/davidsonking112-netizen/forge-cli.git
@@ -25,6 +25,25 @@ $env:FORGE_PYTHON = "python"
 forge init --workspace .
 forge status --workspace .
 ```
+
+If Git is not installed, use the GitHub ZIP download instead. This requires no administrator rights and avoids npm’s `spawn git ENOENT` failure:
+
+```powershell
+$ErrorActionPreference = "Stop"
+$zip = Join-Path $env:TEMP "forge-cli-main.zip"
+$root = Join-Path $HOME "Downloads"
+Invoke-WebRequest "https://github.com/davidsonking112-netizen/forge-cli/archive/refs/heads/main.zip" -OutFile $zip
+Expand-Archive $zip -DestinationPath $root -Force
+Remove-Item $zip -Force
+Set-Location (Join-Path $root "forge-cli-main")
+npm ci
+npm run build
+$env:FORGE_PYTHON = "python"
+node .\dist\apps\forge-cli\src\main.js init --workspace .
+node .\dist\apps\forge-cli\src\main.js status --workspace .
+```
+
+For a local source checkout, invoke `node .\dist\apps\forge-cli\src\main.js` directly. Do not append `--workspace .` to `npm run forge -- ...`; npm interprets `--workspace` as an npm workspace selector rather than forwarding it to Forge.
 
 The GitHub source package is currently a development/release-candidate package rather than a registry-published `1.0.0` package. It still requires Node.js 22+ and Python 3.11+. API credentials remain environment-only; npm does not receive or store provider secrets. When a final registry package is approved, the package name, version, lockfile, and cross-platform distribution checks should be finalized before publishing.
 
@@ -91,7 +110,18 @@ FORGE_REASONING_EFFORT=medium \
 node dist/apps/forge-cli/src/main.js "inspect this repository"
 ```
 
-See [docs/PROVIDERS.md](docs/PROVIDERS.md) for provider behavior and credential handling. Run `forge providers` for an offline configuration overview. Forge also provides presets for OpenRouter (`OPENROUTER_API_KEY`), Groq (`GROQ_API_KEY`), Gemini/Google AI Studio (`GEMINI_API_KEY`, `GOOGLE_API_KEY`, or `GOOGLE_AI_STUDIO_API_KEY`), and xAI (`XAI_API_KEY`); set `FORGE_PROVIDER` to `openrouter`, `groq`, `google-ai-studio`, or `xai`. Any additional OpenAI-compatible service can use the generic `FORGE_BASE_URL` and `FORGE_MODEL` path. `FORGE_TOKEN_PARAMETER=auto|max_tokens|max_completion_tokens` controls the compatibility field used for token budgets.
+See [docs/PROVIDERS.md](docs/PROVIDERS.md) for provider behavior and credential handling. Run `forge providers` for an offline configuration overview. Forge provides presets for Requesty (`REQUESTY_API_KEY`), OpenRouter (`OPENROUTER_API_KEY`), Groq (`GROQ_API_KEY`), Gemini/Google AI Studio (`GEMINI_API_KEY`, `GOOGLE_API_KEY`, or `GOOGLE_AI_STUDIO_API_KEY`), and xAI (`XAI_API_KEY`). Set `FORGE_PROVIDER` to `requesty`, `openrouter`, `groq`, `google-ai-studio`, or `xai`. Any additional OpenAI-compatible service can use the generic `FORGE_BASE_URL` and `FORGE_MODEL` path. `FORGE_TOKEN_PARAMETER=auto|max_tokens|max_completion_tokens` controls the compatibility field used for token budgets.
+
+For Requesty on Windows PowerShell:
+
+```powershell
+$env:FORGE_PROVIDER = "requesty"
+$env:REQUESTY_API_KEY = "your-requesty-key"
+$env:FORGE_MODEL = "openai/gpt-4o-mini"
+forge run --prompt "Review this repository and propose safe improvements"
+```
+
+Forge reads the Requesty key only from the environment; do not commit it to a repository or place it in a prompt, config file, or command argument.
 
 Enable bounded specialist analysis with an explicit quality-preserving budget. Forge retains five built-in typed roles—Explorer, Architect, Implementer, Tester, and Reviewer—and the supervisor can create up to three additional task-specific, read-only specialists from bounded role templates when the requested task signals security, dependencies, accessibility, UX/browser behavior, backend integration, data integrity, performance, release readiness, or complex cross-cutting work. The Explorer returns files, symbols, conventions, risks, unknowns, and evidence; the Architect returns an advisory milestone graph and acceptance mapping; the Implementer returns a proposed diff, affected files, preconditions, and rollback notes; the Tester returns a test matrix and explicitly unverified checks; the Reviewer returns blockers, contradictions, and a go/no-go decision; and a custom specialist returns a mission, findings, evidence, risks, recommended checks, and unknowns. Profiles never select a provider model or lower approval requirements. Dynamic specialists receive no tools and cannot authorize, edit, execute, or contact networks.
 

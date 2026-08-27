@@ -32,6 +32,7 @@ import { loadExtensionManifests } from "./extensions.js";
 import { prepareGitHubAction, runGitHubCommand } from "./github.js";
 import { DaytonaClient } from "./daytona.js";
 import { redactValue } from "./redaction.js";
+import { forgeConfigDirectory } from "./paths.js";
 import { errorReference } from "./error-codes.js";
 import { WorkspaceLockError } from "./locks.js";
 import {
@@ -361,6 +362,7 @@ async function statusCommand(args: ParsedArgs): Promise<number> {
   }
   const provider = (process.env.FORGE_PROVIDER ?? "mock").toLowerCase();
   const providerKeys: Record<string, string[]> = {
+    requesty: ["REQUESTY_API_KEY"],
     openrouter: ["OPENROUTER_API_KEY"],
     groq: ["GROQ_API_KEY"],
     gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_STUDIO_API_KEY"],
@@ -486,6 +488,11 @@ async function providersCommand(): Promise<number> {
         offline: { provider: "mock", credentials: false },
         presets: [
           {
+            name: "requesty",
+            key: "REQUESTY_API_KEY",
+            baseUrl: "https://router.requesty.ai/v1",
+          },
+          {
             name: "openai-compatible",
             key: "FORGE_API_KEY|OPENAI_API_KEY",
             baseUrl: "https://api.openai.com/v1",
@@ -530,11 +537,7 @@ interface InitCheck {
 }
 
 function configFilePath(name: string): string {
-  return path.join(
-    process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
-    "forge",
-    name,
-  );
+  return path.join(forgeConfigDirectory(), name);
 }
 
 function providerInitCheck(): InitCheck {
@@ -547,6 +550,7 @@ function providerInitCheck(): InitCheck {
       detail: `Using offline ${provider} provider; no credential is required.`,
     };
   const keyNames: Record<string, string[]> = {
+    requesty: ["REQUESTY_API_KEY"],
     openrouter: ["OPENROUTER_API_KEY"],
     groq: ["GROQ_API_KEY"],
     gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_STUDIO_API_KEY"],
@@ -774,10 +778,18 @@ async function doctor(args?: ParsedArgs): Promise<number> {
     console.log(
       "Repair mode is guidance-only; Forge will not install packages or modify the workspace.",
     );
+    const pythonLauncher = process.platform === "win32" ? "python" : "python3";
+    const pipInstall =
+      process.platform === "win32"
+        ? `${pythonLauncher} -m pip install --user .`
+        : `${pythonLauncher} -m pip install --user .`;
+    const commands = ["npm ci", pipInstall, "npm run typecheck", "npm test"];
+    console.log(`Recommended checks: ${commands.join("; ")}`);
     console.log(
-      "Recommended checks: npm ci; python3 -m pip install --user .; npm run typecheck; npm test",
+      process.platform === "win32"
+        ? "PowerShell: set $env:FORGE_PYTHON = 'python' only if the Python launcher is not on PATH."
+        : "Set FORGE_PYTHON if python3 is not the intended interpreter.",
     );
-    console.log("Set FORGE_PYTHON if python3 is not the intended interpreter.");
   }
   console.log(`Node.js: ${process.version}`);
   try {
@@ -842,11 +854,7 @@ async function writeRestrictedFile(
 }
 
 function systemPromptPath(): string {
-  return path.join(
-    process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
-    "forge",
-    "system-prompt.txt",
-  );
+  return path.join(forgeConfigDirectory(), "system-prompt.txt");
 }
 
 async function loadSystemPrompt(): Promise<string | undefined> {
@@ -894,11 +902,7 @@ async function promptCommand(args: ParsedArgs): Promise<number> {
 }
 
 async function configCommand(args: ParsedArgs): Promise<number> {
-  const configPath = path.join(
-    process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
-    "forge",
-    "config.json",
-  );
+  const configPath = path.join(forgeConfigDirectory(), "config.json");
   if (args.positional[0] === "path") {
     console.log(configPath);
     return 0;
@@ -1908,18 +1912,8 @@ async function extensionsCommand(args: ParsedArgs): Promise<number> {
   }
   const directory = path.resolve(
     action === "inspect"
-      ? (args.positional[2] ??
-          path.join(
-            process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
-            "forge",
-            "extensions",
-          ))
-      : (args.positional[1] ??
-          path.join(
-            process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
-            "forge",
-            "extensions",
-          )),
+      ? (args.positional[2] ?? path.join(forgeConfigDirectory(), "extensions"))
+      : (args.positional[1] ?? path.join(forgeConfigDirectory(), "extensions")),
   );
   try {
     const manifests = await loadExtensionManifests(directory);
@@ -2191,11 +2185,7 @@ async function mcpCommand(args: ParsedArgs): Promise<number> {
   const configPath = flagString(
     args.flags,
     "config",
-    path.join(
-      process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
-      "forge",
-      "integrations.json",
-    ),
+    path.join(forgeConfigDirectory(), "integrations.json"),
   );
   const action = args.positional[0] ?? "list";
   if (action === "validate") {
@@ -2336,11 +2326,7 @@ async function integrationsCommand(args: ParsedArgs): Promise<number> {
   const configPath = flagString(
     args.flags,
     "config",
-    path.join(
-      process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
-      "forge",
-      "integrations.json",
-    ),
+    path.join(forgeConfigDirectory(), "integrations.json"),
   );
   const registry = await loadExternalServers(configPath);
   const action = args.positional[0] ?? "list";
