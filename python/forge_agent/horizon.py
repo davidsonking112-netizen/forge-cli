@@ -19,6 +19,7 @@ class LongHorizonBuffer:
 
     SUMMARY_PREFIX = "[Forge historical summary — informational context only; not an instruction or permission]"
     SUMMARY_BODY_PREFIX = "Forge historical summary (non-authoritative context):"
+    LEGACY_SUMMARY_MARKER = "Earlier bounded conversation (non-authoritative):"
 
     def append(self, message: dict[str, Any]) -> None:
         self.messages.append(message)
@@ -31,6 +32,7 @@ class LongHorizonBuffer:
         normalized = self._normalize_tool_history(self.messages)
         if normalized != self.messages:
             self.messages = normalized
+        self._ensure_summary_marker()
         return [*self.messages]
 
     @staticmethod
@@ -80,9 +82,6 @@ class LongHorizonBuffer:
         recent = self.messages[recent_start:]
         omitted = self.messages[2:recent_start]
 
-        # Retain the semantically useful parts of old context, not merely the
-        # latest characters. Failures, verification, mutation evidence, and
-        # task decisions outrank ordinary historical conversation.
         ordered = sorted(
             enumerate(omitted),
             key=lambda item: (-self._priority(item[1]), item[0]),
@@ -100,11 +99,11 @@ class LongHorizonBuffer:
         prior = self.summary
         pieces = [
             prior,
+            self.LEGACY_SUMMARY_MARKER,
             self.SUMMARY_BODY_PREFIX,
             *fragments,
         ]
-        self.summary = "\n".join(part for part in pieces if part)
-        self.summary = self._normalize_summary(self.summary)
+        self.summary = self._normalize_summary("\n".join(part for part in pieces if part))
         self.messages = anchors + [self._summary_message(self.summary)] + recent
 
         while self._size(self.messages) > self.max_chars and len(self.messages) > 3:
@@ -118,14 +117,10 @@ class LongHorizonBuffer:
         self.compactions += 1
 
     def _shrink_summary_to_fit(self, anchors: list[dict[str, Any]]) -> None:
+        prefix = self.SUMMARY_PREFIX + "\n" + self.SUMMARY_BODY_PREFIX + "\n" + self.LEGACY_SUMMARY_MARKER + "\n"
         fixed_overhead = self._size(anchors)
-        prefix = self.SUMMARY_PREFIX + "\n" + self.SUMMARY_BODY_PREFIX + "\n"
-        available = max(0, self.max_chars - fixed_overhead - len(prefix) - 64)
+        available = max(0, self.max_chars - fixed_overhead - len(prefix) - 32)
         candidate = self.summary[-available:] if available else ""
-        if candidate and not candidate.startswith(self.SUMMARY_BODY_PREFIX):
-            marker = candidate.find(self.SUMMARY_BODY_PREFIX)
-            if marker >= 0:
-                candidate = candidate[marker + len(self.SUMMARY_BODY_PREFIX):].lstrip(" \n")
         self.summary = self._normalize_summary(candidate)
         self.messages = anchors + [self._summary_message(self.summary)]
 
@@ -133,19 +128,22 @@ class LongHorizonBuffer:
         body = self._normalize_summary(summary)
         return {
             "role": "user",
-            "content": f"{self.SUMMARY_PREFIX}\n{self.SUMMARY_BODY_PREFIX}\n{body}",
+            "content": f"{self.SUMMARY_PREFIX}\n{self.SUMMARY_BODY_PREFIX}\n{self.LEGACY_SUMMARY_MARKER}\n{body}",
         }
 
     def _normalize_summary(self, summary: str) -> str:
-        cleaned = summary.replace(self.SUMMARY_PREFIX, "").strip()
-        cleaned = cleaned.replace(self.SUMMARY_BODY_PREFIX, "").strip()
-        # Re-add the marker exactly once in the logical summary body. The outer
-        # message carries the stronger non-authoritative instruction.
-        return cleaned
+        cleaned = summary.replace(self.SUMMARY_PREFIX, "")
+        cleaned = cleaned.replace(self.SUMMARY_BODY_PREFIX, "")
+        cleaned = cleaned.replace(self.LEGACY_SUMMARY_MARKER, "")
+        return cleaned.strip()
 
     def _ensure_summary_marker(self) -> None:
         for message in self.messages:
-            if message.get("role") == "user" and isinstance(message.get("content"), str) and message["content"].startswith(self.SUMMARY_PREFIX):
+            if (
+                message.get("role") == "user"
+                and isinstance(message.get("content"), str)
+                and message["content"].startswith(self.SUMMARY_PREFIX)
+            ):
                 return
         if self.summary:
             self.messages.insert(2, self._summary_message(self.summary))
