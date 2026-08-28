@@ -10,99 +10,149 @@ export interface TaskIntent {
   requiresApproval: boolean;
   allowsMutation: boolean;
   allowsLocalExecution: boolean;
+  confidence: "explicit" | "inferred" | "default";
+  signals: string[];
   rationale: string;
 }
 
-const PROPOSAL_PATTERNS = [
-  /\b(?:propose|suggest|recommend|outline)\b[\s\S]{0,240}\b(?:change|patch|fix|implementation|improvement)\b/i,
-  /\b(?:wait|await)\b[\s\S]{0,80}\b(?:approval|approve|permission)\b/i,
-  /\b(?:do not|don't|without)\b[\s\S]{0,80}\b(?:modify|change|write|edit|apply|run|execute)\b/i,
-  /\b(?:what|which)\b[\s\S]{0,80}\b(?:would you change|should be changed|would you fix)\b/i,
+const MUTATION_WORDS = /\b(?:create|write|edit|modify|change|delete|remove|apply|fix|patch|implement|build|refactor|rename|move|install|migrate|commit|stage)\b/i;
+const EXECUTION_WORDS = /\b(?:run|execute|test|compile|typecheck|lint|start|launch)\b/i;
+const INSPECTION_WORDS = /\b(?:inspect|review|analy[sz]e|audit|examine|investigate|find|locate|understand|show|tell|explain)\b/i;
+const PLAN_WORDS = /\b(?:plan|design|architect|strategy|approach|outline)\b/i;
+
+const PROPOSAL_PHRASES = [
+  /\b(?:propose|suggest|recommend)\b[\s\S]{0,240}\b(?:change|patch|fix|implementation|improvement)\b/i,
+  /\b(?:wait|await)\b[\s\S]{0,120}\b(?:approval|approve|permission)\b/i,
+  /\b(?:what|which)\b[\s\S]{0,120}\b(?:would you change|should be changed|would you fix)\b/i,
+  /\b(?:show|give|provide)\b[\s\S]{0,120}\b(?:a patch|the changes|the diff)\b[\s\S]{0,120}\b(?:before|without)\b/i,
 ];
 
-const PLAN_PATTERNS = [
-  /\b(?:plan|design|architect|strategy|approach)\b/i,
-  /\bhow\s+should\s+(?:we|i|you)\b/i,
+const READ_ONLY_PHRASES = [
+  /\b(?:read[- ]only)\b/i,
+  /\b(?:without|before)\b[\s\S]{0,80}\b(?:changing|modifying|editing|writing|applying|executing|running)\b/i,
+  /\b(?:do not|don't|never)\b[\s\S]{0,60}\b(?:change|modify|edit|write|apply|execute|run|create|delete)\b/i,
+  /\b(?:just|only)\b[\s\S]{0,40}\b(?:explain|inspect|review|analy[sz]e|show|tell)\b/i,
 ];
 
-const INSPECT_PATTERNS = [
-  /\b(?:inspect|review|analy[sz]e|audit|examine|investigate|find|locate|understand)\b/i,
+const POSITIVE_MUTATION_PHRASES = [
+  /\b(?:go ahead|proceed|make|apply|implement|fix|create|delete|edit|modify|write)\b/i,
+  /\b(?:you can|please)\b[\s\S]{0,40}\b(?:change|modify|edit|write|apply|implement|fix|create|delete)\b/i,
 ];
 
-const MUTATION_PATTERNS = [
-  /\b(?:create|write|edit|modify|change|delete|remove|apply|fix|patch|implement|build|refactor|rename|move|install|migrate|commit|stage)\b/i,
-];
-
-const EXECUTION_PATTERNS = [
-  /\b(?:run|execute|test|compile|typecheck|lint|start|launch)\b/i,
-];
-
-const EXPLICIT_READ_ONLY = /\b(?:read[- ]only|explain|tell me|show me|without changing|without modifying|do not change|don't change|do not make changes|don't make changes)\b/i;
+function result(
+  mode: TaskIntentMode,
+  confidence: TaskIntent["confidence"],
+  signals: string[],
+  rationale: string,
+  overrides: Partial<TaskIntent> = {},
+): TaskIntent {
+  const allowsMutation = mode === "mutation";
+  return {
+    mode,
+    requiresApproval: allowsMutation || mode === "proposal",
+    allowsMutation,
+    allowsLocalExecution: false,
+    confidence,
+    signals,
+    rationale,
+    ...overrides,
+  };
+}
 
 export function classifyTaskIntent(prompt: string): TaskIntent {
-  const normalized = prompt.trim();
+  const normalized = prompt.replace(/\s+/g, " ").trim();
   if (!normalized) {
-    return {
-      mode: "answer",
-      requiresApproval: false,
-      allowsMutation: false,
-      allowsLocalExecution: false,
-      rationale: "Empty prompt defaults to a non-mutating answer mode.",
-    };
+    return result(
+      "answer",
+      "default",
+      ["empty-prompt"],
+      "Empty prompt defaults to a non-mutating answer mode.",
+    );
   }
 
-  const proposal = PROPOSAL_PATTERNS.some((pattern) => pattern.test(normalized));
-  const mutationRequested = MUTATION_PATTERNS.some((pattern) => pattern.test(normalized));
-  const explicitReadOnly = EXPLICIT_READ_ONLY.test(normalized);
+  const signals: string[] = [];
+  const hasMutation = MUTATION_WORDS.test(normalized);
+  const hasExecution = EXECUTION_WORDS.test(normalized);
+  const hasInspection = INSPECTION_WORDS.test(normalized);
+  const hasPlan = PLAN_WORDS.test(normalized);
+  const hasProposal = PROPOSAL_PHRASES.some((pattern) => pattern.test(normalized));
+  const hasReadOnly = READ_ONLY_PHRASES.some((pattern) => pattern.test(normalized));
+  const hasPositiveMutation = POSITIVE_MUTATION_PHRASES.some((pattern) => pattern.test(normalized));
 
-  // Explicit non-mutating language wins over incidental mutation vocabulary.
-  if (proposal || explicitReadOnly) {
-    return {
-      mode: proposal ? "proposal" : "inspect",
-      requiresApproval: proposal,
-      allowsMutation: false,
-      allowsLocalExecution: !proposal && EXECUTION_PATTERNS.some((pattern) => pattern.test(normalized)),
-      rationale: proposal
-        ? "The request asks for recommendations or a proposed change without granting mutation authority."
-        : "The request explicitly limits workspace mutation.",
-    };
+  if (hasProposal) signals.push("proposal-language");
+  if (hasReadOnly) signals.push("explicit-read-only");
+  if (hasMutation) signals.push("mutation-language");
+  if (hasPositiveMutation) signals.push("explicit-mutation");
+  if (hasExecution) signals.push("execution-language");
+  if (hasInspection) signals.push("inspection-language");
+  if (hasPlan) signals.push("planning-language");
+
+  // Precedence is intentional: explicit restrictions beat incidental vocabulary;
+  // explicit proposal requests beat both; explicit execution authority comes next.
+  if (hasReadOnly && !hasPositiveMutation) {
+    return result(
+      hasProposal ? "proposal" : hasPlan ? "plan" : "inspect",
+      "explicit",
+      signals,
+      hasProposal
+        ? "The request asks for a proposal while explicitly withholding mutation authority."
+        : "Explicit read-only language overrides incidental mutation or execution vocabulary.",
+      { allowsLocalExecution: hasProposal ? false : hasExecution },
+    );
   }
 
-  if (PLAN_PATTERNS.some((pattern) => pattern.test(normalized)) && !mutationRequested) {
-    return {
-      mode: "plan",
-      requiresApproval: false,
-      allowsMutation: false,
-      allowsLocalExecution: false,
-      rationale: "The request asks for planning or design rather than execution.",
-    };
+  if (hasProposal) {
+    return result(
+      "proposal",
+      "explicit",
+      signals,
+      "The request asks for a recommendation or proposed change rather than authorizing mutation.",
+    );
   }
 
-  if (mutationRequested) {
-    return {
-      mode: "mutation",
-      requiresApproval: true,
-      allowsMutation: true,
-      allowsLocalExecution: EXECUTION_PATTERNS.some((pattern) => pattern.test(normalized)),
-      rationale: "The request explicitly asks Forge to change or create workspace state.",
-    };
+  if (hasPositiveMutation && hasMutation) {
+    return result(
+      "mutation",
+      "explicit",
+      signals,
+      "The request explicitly authorizes Forge to change workspace state.",
+      { allowsLocalExecution: hasExecution },
+    );
   }
 
-  if (INSPECT_PATTERNS.some((pattern) => pattern.test(normalized))) {
-    return {
-      mode: "inspect",
-      requiresApproval: false,
-      allowsMutation: false,
-      allowsLocalExecution: EXECUTION_PATTERNS.some((pattern) => pattern.test(normalized)),
-      rationale: "The request is primarily investigative or read-only.",
-    };
+  if (hasPlan && !hasMutation) {
+    return result(
+      "plan",
+      "explicit",
+      signals,
+      "The request asks for planning or design rather than workspace mutation.",
+    );
   }
 
-  return {
-    mode: "answer",
-    requiresApproval: false,
-    allowsMutation: false,
-    allowsLocalExecution: false,
-    rationale: "The request does not contain an explicit workspace mutation or inspection goal.",
-  };
+  if (hasInspection && !hasMutation) {
+    return result(
+      "inspect",
+      "inferred",
+      signals,
+      "The request is primarily investigative or read-only.",
+      { allowsLocalExecution: hasExecution },
+    );
+  }
+
+  if (hasMutation) {
+    return result(
+      "mutation",
+      "inferred",
+      signals,
+      "Mutation vocabulary is present without an explicit restriction, so Forge treats it as a requested change and still approval-gates execution.",
+      { allowsLocalExecution: hasExecution },
+    );
+  }
+
+  return result(
+    "answer",
+    "default",
+    signals.length ? signals : ["no-action-signal"],
+    "No explicit workspace mutation or inspection intent was detected.",
+  );
 }
