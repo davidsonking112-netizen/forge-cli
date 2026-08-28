@@ -52,8 +52,9 @@ export function classifyTaskIntent(prompt: string): TaskIntent {
   }
 
   const proposal = PROPOSAL_PATTERNS.some((pattern) => pattern.test(normalized));
+  const mutationRequested = MUTATION_PATTERNS.some((pattern) => pattern.test(normalized));
   const explicitReadOnly = EXPLICIT_READ_ONLY.test(normalized);
-  if (proposal || explicitReadOnly && MUTATION_PATTERNS.test?.call?.(MUTATION_PATTERNS, normalized)) {
+  if (proposal || (explicitReadOnly && mutationRequested)) {
     return {
       mode: "proposal",
       requiresApproval: true,
@@ -63,7 +64,7 @@ export function classifyTaskIntent(prompt: string): TaskIntent {
     };
   }
 
-  if (PLAN_PATTERNS.some((pattern) => pattern.test(normalized)) && !MUTATION_PATTERNS.some((pattern) => pattern.test(normalized))) {
+  if (PLAN_PATTERNS.some((pattern) => pattern.test(normalized)) && !mutationRequested) {
     return {
       mode: "plan",
       requiresApproval: false,
@@ -73,7 +74,7 @@ export function classifyTaskIntent(prompt: string): TaskIntent {
     };
   }
 
-  if (MUTATION_PATTERNS.some((pattern) => pattern.test(normalized))) {
+  if (mutationRequested) {
     return {
       mode: "mutation",
       requiresApproval: true,
