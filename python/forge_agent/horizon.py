@@ -39,6 +39,7 @@ class LongHorizonBuffer:
 
     @staticmethod
     def _normalize_tool_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Keep paired tool turns atomic while preserving standalone evidence messages."""
         result: list[dict[str, Any]] = []
         pending_start: int | None = None
         pending_ids: set[str] = set()
@@ -49,7 +50,11 @@ class LongHorizonBuffer:
                 if pending_ids and pending_start is not None:
                     result = result[:pending_start]
                 pending_start = len(result)
-                pending_ids = {str(call.get("id")) for call in calls if isinstance(call, dict) and call.get("id")}
+                pending_ids = {
+                    str(call.get("id"))
+                    for call in calls
+                    if isinstance(call, dict) and call.get("id")
+                }
                 result.append(message)
                 continue
             if role == "tool":
@@ -59,6 +64,10 @@ class LongHorizonBuffer:
                     pending_ids.remove(call_id)
                     if not pending_ids:
                         pending_start = None
+                else:
+                    # Synthetic verification/failure evidence may legitimately
+                    # be tool-role messages without a matching provider call.
+                    result.append(message)
                 continue
             if pending_ids and pending_start is not None:
                 result = result[:pending_start]
@@ -114,7 +123,6 @@ class LongHorizonBuffer:
             self.summary = self.summary[:-remove]
             self.messages = anchors + [self._summary_message(self.summary)]
         if self._size(self.messages) > self.max_chars:
-            # A hard limit is preferable to silently exceeding the provider budget.
             self.summary = self.summary[: max(0, len(self.summary) - (self._size(self.messages) - self.max_chars) - 32)]
             self.messages = anchors + [self._summary_message(self.summary)]
 
