@@ -24,10 +24,14 @@ test("DAG only exposes tasks whose dependencies completed", () => {
 });
 
 test("DAG rejects cycles before they can enter scheduler state", () => {
-  const graph = new TaskGraph();
-  graph.addTask({ id: "a", title: "A", prompt: "a" });
-  graph.addTask({ id: "b", title: "B", prompt: "b", dependsOn: ["a"] });
-  assert.throws(() => graph.addTask({ id: "a2", title: "A2", prompt: "a2", dependsOn: ["b", "a2"] }), /cycle/i);
+  assert.throws(() => TaskGraph.fromSnapshot({
+    version: 1,
+    nodes: [
+      { id: "a", title: "A", prompt: "a", dependsOn: ["b"], status: "pending", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+      { id: "b", title: "B", prompt: "b", dependsOn: ["a"], status: "pending", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+    ],
+    edges: [{ from: "a", to: "b" }, { from: "b", to: "a" }],
+  }), /cycle/i);
 });
 
 test("completion requires actual evidence or validation", () => {
