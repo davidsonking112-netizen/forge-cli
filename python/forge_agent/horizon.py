@@ -34,12 +34,12 @@ class LongHorizonBuffer:
             self.messages = normalized
         self._ensure_summary_marker()
         if self._size(self.messages) > self.max_chars and self.summary:
-            self._shrink_summary_to_fit(self.messages[:2])
+            self._shrink_summary_preserving_recent(self.messages[:2], self.messages[3:])
         return [*self.messages]
 
     @staticmethod
     def _normalize_tool_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Keep paired tool turns atomic while preserving standalone evidence messages."""
+        """Keep paired provider tool turns atomic and discard only truly orphaned tool results."""
         result: list[dict[str, Any]] = []
         pending_start: int | None = None
         pending_ids: set[str] = set()
@@ -50,11 +50,7 @@ class LongHorizonBuffer:
                 if pending_ids and pending_start is not None:
                     result = result[:pending_start]
                 pending_start = len(result)
-                pending_ids = {
-                    str(call.get("id"))
-                    for call in calls
-                    if isinstance(call, dict) and call.get("id")
-                }
+                pending_ids = {str(call.get("id")) for call in calls if isinstance(call, dict) and call.get("id")}
                 result.append(message)
                 continue
             if role == "tool":
@@ -64,9 +60,13 @@ class LongHorizonBuffer:
                     pending_ids.remove(call_id)
                     if not pending_ids:
                         pending_start = None
+                elif call_id:
+                    # A tool_call_id identifies a provider result; without a
+                    # matching assistant call it is an orphan and is discarded.
+                    continue
                 else:
-                    # Synthetic verification/failure evidence may legitimately
-                    # be tool-role messages without a matching provider call.
+                    # Supervisor-generated verification/failure evidence is
+                    # intentionally tool-role but has no provider call id.
                     result.append(message)
                 continue
             if pending_ids and pending_start is not None:
@@ -82,7 +82,7 @@ class LongHorizonBuffer:
         if len(self.messages) <= 3:
             self.messages = self._truncate_messages(self.messages[: self.max_messages])
             if self._size(self.messages) > self.max_chars and self.summary:
-                self._shrink_summary_to_fit(self.messages[:2])
+                self._shrink_summary_preserving_recent(self.messages[:2], self.messages[2:])
             return
         anchors = self.messages[:2]
         recent_start = self._recent_start(self.messages)
@@ -90,7 +90,7 @@ class LongHorizonBuffer:
         omitted = self.messages[2:recent_start]
         ordered = sorted(enumerate(omitted), key=lambda item: (-self._priority(item[1]), item[0]))
         fragments: list[str] = []
-        fragment_budget = 6_500
+        fragment_budget = min(6_500, max(200, self.max_chars // 4))
         used = 0
         for _, message in ordered:
             fragment = self._message_summary(message)
@@ -101,30 +101,35 @@ class LongHorizonBuffer:
         prior = self.summary
         self.summary = self._normalize_summary("\n".join(part for part in [prior, self.LEGACY_SUMMARY_MARKER, self.SUMMARY_BODY_PREFIX, *fragments] if part))
         self.messages = anchors + [self._summary_message(self.summary)] + recent
+        # Remove only low-value turns while keeping verification/failure evidence.
         while self._size(self.messages) > self.max_chars and len(self.messages) > 3:
-            self._drop_low_value_turn(self.messages, 3)
-        if self._size(self.messages) > self.max_chars:
-            self._shrink_summary_to_fit(anchors)
+            candidates = [
+                index for index in range(3, len(self.messages))
+                if self._priority(self.messages[index]) < 880
+            ]
+            if not candidates:
+                break
+            self._drop_low_value_turn(self.messages, min(candidates, key=lambda i: self._priority(self.messages[i])))
         self.messages = self._normalize_tool_history(self._truncate_messages(self.messages))
         self._ensure_summary_marker()
-        if self._size(self.messages) > self.max_chars and self.summary:
-            self._shrink_summary_to_fit(anchors)
+        if self._size(self.messages) > self.max_chars:
+            self._shrink_summary_preserving_recent(anchors, self.messages[3:])
         self.compactions += 1
 
-    def _shrink_summary_to_fit(self, anchors: list[dict[str, Any]]) -> None:
-        prefix = self.SUMMARY_PREFIX + "\n" + self.SUMMARY_BODY_PREFIX + "\n" + self.LEGACY_SUMMARY_MARKER + "\n"
-        fixed_overhead = self._size(anchors)
-        available = max(64, self.max_chars - fixed_overhead - len(prefix) - 64)
+    def _shrink_summary_preserving_recent(self, anchors: list[dict[str, Any]], recent: list[dict[str, Any]]) -> None:
+        fixed = self._size(anchors + recent)
+        prefix = self.SUMMARY_PREFIX + "\n"
+        available = max(0, self.max_chars - fixed - len(prefix) - 16)
         self.summary = self._normalize_summary(self.summary[:available])
-        self.messages = anchors + [self._summary_message(self.summary)]
+        self.messages = anchors + ([self._summary_message(self.summary)] if self.summary else []) + recent
         while self._size(self.messages) > self.max_chars and self.summary:
             excess = self._size(self.messages) - self.max_chars
-            remove = max(16, excess + 8)
-            self.summary = self.summary[:-remove]
-            self.messages = anchors + [self._summary_message(self.summary)]
+            self.summary = self.summary[:-max(8, excess + 4)]
+            self.messages = anchors + [self._summary_message(self.summary)] + recent
         if self._size(self.messages) > self.max_chars:
-            self.summary = self.summary[: max(0, len(self.summary) - (self._size(self.messages) - self.max_chars) - 32)]
-            self.messages = anchors + [self._summary_message(self.summary)]
+            # Last resort: preserve the anchors and high-value recent evidence,
+            # while truncating content rather than deleting entire evidence turns.
+            self.messages = self._truncate_messages(self.messages)
 
     def _summary_message(self, summary: str) -> dict[str, Any]:
         body = self._normalize_summary(summary)
@@ -162,18 +167,16 @@ class LongHorizonBuffer:
     @staticmethod
     def _drop_low_value_turn(messages: list[dict[str, Any]], index: int) -> None:
         if index >= len(messages): return
-        candidates = list(range(index, len(messages)))
-        drop_index = min(candidates, key=lambda candidate: LongHorizonBuffer._priority(messages[candidate]))
-        candidate = messages[drop_index]
+        candidate = messages[index]
         calls = candidate.get("tool_calls")
         if candidate.get("role") != "assistant" or not isinstance(calls, list) or not calls:
-            del messages[drop_index]
+            del messages[index]
             return
         call_ids = {str(call.get("id")) for call in calls if isinstance(call, dict) and call.get("id")}
-        end = drop_index + 1
+        end = index + 1
         while end < len(messages) and messages[end].get("role") == "tool" and str(messages[end].get("tool_call_id", "")) in call_ids:
             end += 1
-        del messages[drop_index:end]
+        del messages[index:end]
 
     def _truncate_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result = [dict(message) for message in messages]
@@ -182,7 +185,7 @@ class LongHorizonBuffer:
             if not candidates: break
             index = min(candidates, key=lambda item: (self._priority(result[item]), -len(str(result[item]["content"]))))
             content = str(result[index]["content"])
-            new_length = max(256, int(len(content) * 0.75))
+            new_length = max(64, int(len(content) * 0.75))
             result[index]["content"] = content[:new_length]
         return result
 
