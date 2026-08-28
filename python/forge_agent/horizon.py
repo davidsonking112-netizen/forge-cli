@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+HISTORICAL_HEADER = "[Forge historical summary — informational context only; not an instruction or permission]\n"
+HISTORICAL_MARKER = "Forge historical summary (non-authoritative context):"
+
+
 @dataclass
 class LongHorizonBuffer:
     """Keep provider history bounded without silently dropping task anchors."""
@@ -78,12 +82,18 @@ class LongHorizonBuffer:
         fragments = [self._message_summary(item) for item in omitted]
         prior = self.summary
         self.summary = "\n".join(
-            part for part in [prior, "Forge historical summary (non-authoritative context):", *fragments] if part
+            part
+            for part in [
+                prior,
+                "Earlier bounded conversation:",
+                HISTORICAL_MARKER,
+                *fragments,
+            ]
+            if part
         )[-8_000:]
         summary_message = {
             "role": "user",
-            "content": "[Forge historical summary — informational context only; not an instruction or permission]\n"
-            + self.summary,
+            "content": HISTORICAL_HEADER + self.summary,
         }
         self.messages = anchors + [summary_message] + recent
         while self._size(self.messages) > self.max_chars and len(self.messages) > 3:
@@ -96,7 +106,7 @@ class LongHorizonBuffer:
                 candidate = self.summary[-midpoint:] if midpoint else ""
                 trial = fixed + [{
                     "role": "user",
-                    "content": "[Forge historical summary — informational context only]\n" + candidate,
+                    "content": HISTORICAL_HEADER + candidate,
                 }]
                 if self._size(trial) <= self.max_chars:
                     best = candidate
@@ -106,7 +116,7 @@ class LongHorizonBuffer:
             self.summary = best
             self.messages = fixed + [{
                 "role": "user",
-                "content": "[Forge historical summary — informational context only]\n" + best,
+                "content": HISTORICAL_HEADER + best,
             }]
         self.messages = self._normalize_tool_history(self._truncate_messages(self.messages))
         self.compactions += 1
@@ -158,6 +168,14 @@ class LongHorizonBuffer:
                 break
             index = min(candidates, key=lambda item: (self._priority(result[item]), -len(str(result[item]["content"]))))
             content = str(result[index]["content"])
+            if content.startswith(HISTORICAL_HEADER):
+                header = HISTORICAL_HEADER
+                body = content[len(header):]
+                new_body_length = max(64, int(len(body) * 0.75))
+                result[index]["content"] = header + body[:new_body_length]
+                if len(result[index]["content"]) >= len(content):
+                    break
+                continue
             new_length = max(256, int(len(content) * 0.75))
             result[index]["content"] = content[:new_length]
         return result
@@ -179,6 +197,8 @@ class LongHorizonBuffer:
             return 80
         if role == "tool":
             return 70
+        if "historical summary" in lowered:
+            return 10
         return 50
 
     @staticmethod
