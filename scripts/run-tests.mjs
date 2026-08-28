@@ -20,23 +20,19 @@ function run(command, args) {
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
-run(process.execPath, [
-  "--test",
-  ...readdirSync(path.join(root, "tests"))
-    .filter((name) => name.endsWith(".test.mjs"))
-    .sort()
-    .map((name) => path.join("tests", name)),
-]);
+function testFiles(directory) {
+  return readdirSync(directory, { withFileTypes: true })
+    .flatMap((entry) => {
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) return testFiles(fullPath);
+      return entry.isFile() && entry.name.endsWith(".test.mjs") ? [fullPath] : [];
+    })
+    .sort();
+}
+
+run(process.execPath, ["--test", ...testFiles(path.join(root, "tests"))]);
 
 const python =
   process.env.FORGE_PYTHON ??
   (process.platform === "win32" ? "python" : "python3");
-run(python, [
-  "-m",
-  "unittest",
-  "discover",
-  "-s",
-  "python/tests",
-  "-p",
-  "test_*.py",
-]);
+run(python, ["-m", "unittest", "discover", "-s", "python/tests", "-p", "test_*.py"]);
