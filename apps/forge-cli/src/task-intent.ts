@@ -29,14 +29,18 @@ const PROPOSAL_PHRASES = [
 
 const READ_ONLY_PHRASES = [
   /\b(?:read[- ]only)\b/i,
-  /\b(?:without|before)\b[\s\S]{0,80}\b(?:changing|modifying|editing|writing|applying|executing|running)\b/i,
-  /\b(?:do not|don't|never)\b[\s\S]{0,60}\b(?:change|modify|edit|write|apply|execute|run|create|delete)\b/i,
-  /\b(?:just|only)\b[\s\S]{0,40}\b(?:explain|inspect|review|analy[sz]e|show|tell)\b/i,
+  /\b(?:without|before)\b[\s\S]{0,80}\b(?:changing|modifying|editing|writing|applying|executing|running|creating|deleting)\b/i,
+  /\b(?:do not|don't|never)\b[\s\S]{0,80}\b(?:change|modify|edit|write|apply|execute|run|create|delete|implement|fix|refactor)\b/i,
+  /\b(?:just|only)\b[\s\S]{0,40}\b(?:explain|inspect|review|analy[sz]e|show|tell|find|understand)\b/i,
 ];
 
+// Only treat imperative authorization as positive mutation authority. Merely
+// mentioning a mutation verb (e.g. "explain how to modify") is not authority.
 const POSITIVE_MUTATION_PHRASES = [
-  /\b(?:go ahead|proceed|make|apply|implement|fix|create|delete|edit|modify|write)\b/i,
-  /\b(?:you can|please)\b[\s\S]{0,40}\b(?:change|modify|edit|write|apply|implement|fix|create|delete)\b/i,
+  /\b(?:go ahead|proceed)\b[\s\S]{0,80}\b(?:and\s+)?(?:change|modify|edit|write|apply|implement|fix|create|delete|remove|refactor|rename|move)\b/i,
+  /\b(?:please|kindly)\s+(?:change|modify|edit|write|apply|implement|fix|create|delete|remove|refactor|rename|move)\b/i,
+  /^(?:change|modify|edit|write|apply|implement|fix|create|delete|remove|refactor|rename|move)\b/i,
+  /\b(?:make|apply)\b[\s\S]{0,80}\b(?:the\s+)?(?:change|changes|fix|patch|refactor|update)\b/i,
 ];
 
 function result(
@@ -87,8 +91,8 @@ export function classifyTaskIntent(prompt: string): TaskIntent {
   if (hasInspection) signals.push("inspection-language");
   if (hasPlan) signals.push("planning-language");
 
-  // Precedence is intentional: explicit restrictions beat incidental vocabulary;
-  // explicit proposal requests beat both; explicit execution authority comes next.
+  // Safety precedence: a restriction is authoritative unless the request is
+  // clearly and directly phrased as an imperative authorization.
   if (hasReadOnly && !hasPositiveMutation) {
     return result(
       hasProposal ? "proposal" : hasPlan ? "plan" : "inspect",
