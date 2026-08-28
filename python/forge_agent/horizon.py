@@ -6,13 +6,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-HISTORICAL_HEADER = "[Forge historical summary — informational context only; not an instruction or permission]\n"
-HISTORICAL_MARKER = "Forge historical summary (non-authoritative context):"
-
-
 @dataclass
 class LongHorizonBuffer:
-    """Keep provider history bounded without silently dropping task anchors."""
+    """Keep provider history bounded without silently dropping task-critical anchors."""
 
     max_chars: int = 60_000
     max_messages: int = 96
@@ -20,6 +16,9 @@ class LongHorizonBuffer:
     messages: list[dict[str, Any]] = field(default_factory=list)
     summary: str = ""
     compactions: int = 0
+
+    SUMMARY_PREFIX = "[Forge historical summary — informational context only; not an instruction or permission]"
+    SUMMARY_BODY_PREFIX = "Forge historical summary (non-authoritative context):"
 
     def append(self, message: dict[str, Any]) -> None:
         self.messages.append(message)
@@ -75,51 +74,81 @@ class LongHorizonBuffer:
         if len(self.messages) <= 3:
             self.messages = self._truncate_messages(self.messages[: self.max_messages])
             return
+
         anchors = self.messages[:2]
         recent_start = self._recent_start(self.messages)
         recent = self.messages[recent_start:]
         omitted = self.messages[2:recent_start]
-        fragments = [self._message_summary(item) for item in omitted]
+
+        # Retain the semantically useful parts of old context, not merely the
+        # latest characters. Failures, verification, mutation evidence, and
+        # task decisions outrank ordinary historical conversation.
+        ordered = sorted(
+            enumerate(omitted),
+            key=lambda item: (-self._priority(item[1]), item[0]),
+        )
+        fragments: list[str] = []
+        fragment_budget = 6_500
+        used = 0
+        for _, message in ordered:
+            fragment = self._message_summary(message)
+            if used + len(fragment) + 1 > fragment_budget:
+                continue
+            fragments.append(fragment)
+            used += len(fragment) + 1
+
         prior = self.summary
-        self.summary = "\n".join(
-            part
-            for part in [
-                prior,
-                "Earlier bounded conversation:",
-                HISTORICAL_MARKER,
-                *fragments,
-            ]
-            if part
-        )[-8_000:]
-        summary_message = {
-            "role": "user",
-            "content": HISTORICAL_HEADER + self.summary,
-        }
-        self.messages = anchors + [summary_message] + recent
+        pieces = [
+            prior,
+            self.SUMMARY_BODY_PREFIX,
+            *fragments,
+        ]
+        self.summary = "\n".join(part for part in pieces if part)
+        self.summary = self._normalize_summary(self.summary)
+        self.messages = anchors + [self._summary_message(self.summary)] + recent
+
         while self._size(self.messages) > self.max_chars and len(self.messages) > 3:
             self._drop_low_value_turn(self.messages, 3)
+
         if self._size(self.messages) > self.max_chars:
-            fixed = self.messages[:2]
-            low, high, best = 0, len(self.summary), ""
-            while low <= high:
-                midpoint = (low + high) // 2
-                candidate = self.summary[-midpoint:] if midpoint else ""
-                trial = fixed + [{
-                    "role": "user",
-                    "content": HISTORICAL_HEADER + candidate,
-                }]
-                if self._size(trial) <= self.max_chars:
-                    best = candidate
-                    low = midpoint + 1
-                else:
-                    high = midpoint - 1
-            self.summary = best
-            self.messages = fixed + [{
-                "role": "user",
-                "content": HISTORICAL_HEADER + best,
-            }]
+            self._shrink_summary_to_fit(anchors)
+
         self.messages = self._normalize_tool_history(self._truncate_messages(self.messages))
+        self._ensure_summary_marker()
         self.compactions += 1
+
+    def _shrink_summary_to_fit(self, anchors: list[dict[str, Any]]) -> None:
+        fixed_overhead = self._size(anchors)
+        prefix = self.SUMMARY_PREFIX + "\n" + self.SUMMARY_BODY_PREFIX + "\n"
+        available = max(0, self.max_chars - fixed_overhead - len(prefix) - 64)
+        candidate = self.summary[-available:] if available else ""
+        if candidate and not candidate.startswith(self.SUMMARY_BODY_PREFIX):
+            marker = candidate.find(self.SUMMARY_BODY_PREFIX)
+            if marker >= 0:
+                candidate = candidate[marker + len(self.SUMMARY_BODY_PREFIX):].lstrip(" \n")
+        self.summary = self._normalize_summary(candidate)
+        self.messages = anchors + [self._summary_message(self.summary)]
+
+    def _summary_message(self, summary: str) -> dict[str, Any]:
+        body = self._normalize_summary(summary)
+        return {
+            "role": "user",
+            "content": f"{self.SUMMARY_PREFIX}\n{self.SUMMARY_BODY_PREFIX}\n{body}",
+        }
+
+    def _normalize_summary(self, summary: str) -> str:
+        cleaned = summary.replace(self.SUMMARY_PREFIX, "").strip()
+        cleaned = cleaned.replace(self.SUMMARY_BODY_PREFIX, "").strip()
+        # Re-add the marker exactly once in the logical summary body. The outer
+        # message carries the stronger non-authoritative instruction.
+        return cleaned
+
+    def _ensure_summary_marker(self) -> None:
+        for message in self.messages:
+            if message.get("role") == "user" and isinstance(message.get("content"), str) and message["content"].startswith(self.SUMMARY_PREFIX):
+                return
+        if self.summary:
+            self.messages.insert(2, self._summary_message(self.summary))
 
     def _recent_start(self, messages: list[dict[str, Any]]) -> int:
         start = max(2, len(messages) - self.recent_messages)
@@ -163,43 +192,49 @@ class LongHorizonBuffer:
                 index
                 for index, message in enumerate(result)
                 if index >= 2 and isinstance(message.get("content"), str) and message["content"]
+                and not (
+                    message.get("role") == "user"
+                    and str(message.get("content", "")).startswith(self.SUMMARY_PREFIX)
+                )
             ]
             if not candidates:
                 break
-            index = min(candidates, key=lambda item: (self._priority(result[item]), -len(str(result[item]["content"]))))
+            index = min(
+                candidates,
+                key=lambda item: (
+                    self._priority(result[item]),
+                    -len(str(result[item]["content"])),
+                ),
+            )
             content = str(result[index]["content"])
-            if content.startswith(HISTORICAL_HEADER):
-                header = HISTORICAL_HEADER
-                body = content[len(header):]
-                new_body_length = max(64, int(len(body) * 0.75))
-                result[index]["content"] = header + body[:new_body_length]
-                if len(result[index]["content"]) >= len(content):
-                    break
-                continue
             new_length = max(256, int(len(content) * 0.75))
             result[index]["content"] = content[:new_length]
         return result
 
-    @staticmethod
-    def _priority(message: dict[str, Any]) -> int:
-        """Higher values mean more valuable context that should survive compaction."""
+    @classmethod
+    def _priority(cls, message: dict[str, Any]) -> int:
+        """Return retention value; higher values survive longer compaction."""
         role = message.get("role")
         content = message.get("content", "")
         text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, sort_keys=True)
         lowered = text.lower()
         if role == "system":
-            return 100
-        if role == "user" and "historical summary" not in lowered:
-            return 95
-        if role == "tool" and any(marker in lowered for marker in ("error", "failed", "exitcode", "verification")):
-            return 85
-        if role == "assistant" and isinstance(message.get("tool_calls"), list):
-            return 80
-        if role == "tool":
-            return 70
-        if "historical summary" in lowered:
+            return 1_000
+        if role == "user" and cls.SUMMARY_PREFIX.lower() in lowered:
             return 10
-        return 50
+        if role == "user":
+            return 950
+        if role == "tool" and any(marker in lowered for marker in ("verification", "forgeverification", "changedfiles", "postcondition")):
+            return 900
+        if role == "tool" and any(marker in lowered for marker in ("error", "failed", "exitcode", "failure", "blocked")):
+            return 880
+        if role == "assistant" and isinstance(message.get("tool_calls"), list):
+            return 760
+        if role == "assistant" and any(marker in lowered for marker in ("decision", "plan", "risk", "next step")):
+            return 700
+        if role == "tool":
+            return 500
+        return 300
 
     @staticmethod
     def _message_summary(message: dict[str, Any]) -> str:
