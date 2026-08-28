@@ -21,7 +21,7 @@ test("ACP rejects malformed, oversized and scalar requests", () => {
 
 test("ACP limits event file lists and rejects unknown methods", () => {
   const bridge = new AcpJsonlBridge(10_000);
-  const response = JSON.parse(bridge.handleLine(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "prompt", params: { files: Array.from({ length: 500 }, (_, i) => `f${i}`) } })));
+  const response = JSON.parse(bridge.handleLine(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "prompt", params: { prompt: "inspect these files", files: Array.from({ length: 500 }, (_, i) => `f${i}`) } })));
   assert.equal(response.result.event.files.length, 100);
   assert.equal(JSON.parse(bridge.handleLine(JSON.stringify({ jsonrpc: "2.0", id: 3, method: "bogus", params: {} }))).error.data.category, "unsupported-event");
 });
