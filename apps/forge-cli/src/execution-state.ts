@@ -5,6 +5,7 @@ import type {
   ToolResultEvent,
 } from "../../../packages/protocol/src/index.js";
 import type { ToolName } from "../../../packages/protocol/src/index.js";
+import { classifyTaskIntent, type TaskIntent } from "./task-intent.js";
 
 export type ExecutionPhase =
   | "intake"
@@ -184,19 +185,9 @@ const CONTRACTS: Record<
   },
 };
 
-function isMutationGoal(prompt: string): boolean {
-  return (
-    /\b(create|write|edit|modify|delete|remove|run|execute|commit|push|deploy|install|migrate|build|implement|fix|patch)\b/i.test(
-      prompt,
-    ) &&
-    !/\b(do not|don't|without)\s+(modify|change|write|edit|run|execute|create|build|implement|fix)/i.test(
-      prompt,
-    )
-  );
-}
-
 export class ImplementationStateMachine {
   private snapshot: ExecutionStateSnapshot;
+  private readonly intent: TaskIntent;
   private readonly requiresMutation: boolean;
   private planReady = false;
   private inspectionEvidence = false;
@@ -222,11 +213,12 @@ export class ImplementationStateMachine {
       maxTransitions?: number;
     } = {},
   ) {
-    this.requiresMutation = isMutationGoal(prompt);
+    this.intent = classifyTaskIntent(prompt);
+    this.requiresMutation = this.intent.mode === "mutation" && this.intent.allowsMutation;
     this.maxTransitions = options.maxTransitions ?? 128;
     this.snapshot = this.makeSnapshot(
       "intake",
-      "Accepted bounded task contract.",
+      `Accepted bounded ${this.intent.mode} task contract. ${this.intent.rationale}`,
       "task",
     );
     this.snapshot.budget = {
@@ -308,6 +300,12 @@ export class ImplementationStateMachine {
         reason:
           "A mutation proposal is blocked until Forge has an execution-plan artifact.",
       };
+    if (MUTATION_TOOLS.has(tool) && !this.intent.allowsMutation)
+      return {
+        ok: false,
+        reason:
+          `This task is ${this.intent.mode}-only; Forge will not accept a workspace mutation proposal for it.`,
+      };
     if (
       MUTATION_TOOLS.has(tool) &&
       this.snapshot.phase === "repair" &&
@@ -363,6 +361,12 @@ export class ImplementationStateMachine {
           ok: false,
           reason:
             "Mutation task completed without passing supervisor milestone verification for every mutation plus both targeted and full verification evidence.",
+        };
+    } else if (this.intent.mode === "proposal") {
+      if (!this.planReady)
+        return {
+          ok: false,
+          reason: "Proposal-only task completed without an execution-plan artifact.",
         };
     } else if (!this.inspectionEvidence && !this.planReady) {
       return {
