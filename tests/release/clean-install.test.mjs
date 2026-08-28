@@ -9,8 +9,8 @@ test("release scripts expose the clean-install and Python audit gates", () => {
   const releaseCheck = readFileSync(path.join(root, "scripts", "release-check.mjs"), "utf8");
   const smoke = path.join(root, "scripts", "clean-install-smoke.mjs");
   assert.equal(existsSync(smoke), true);
-  assert.match(releaseCheck, /pip-audit/);
-  assert.match(releaseCheck, /pip wheel/);
-  assert.match(releaseCheck, /pip.*install.*\.\/python/);
+  assert.match(releaseCheck, /pip_audit|pip-audit/);
+  assert.match(releaseCheck, /pip["\s,]+wheel/);
+  assert.match(releaseCheck, /pip["\s,]+install["\s,]+["']\.\/python/);
   assert.match(releaseCheck, /clean-install-smoke\.mjs/);
 });
