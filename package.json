@@ -8,6 +8,7 @@
   },
   "files": [
     "bin/forge.mjs",
+    "bin/prompt-intent.mjs",
     "dist/",
     "python/forge_agent/*.py",
     "python/pyproject.toml",
