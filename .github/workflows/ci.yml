@@ -13,6 +13,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Install Chromium for browser smoke tests
+        run: sudo apt-get update && sudo apt-get install -y chromium
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
