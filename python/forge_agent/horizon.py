@@ -78,29 +78,36 @@ class LongHorizonBuffer:
         fragments = [self._message_summary(item) for item in omitted]
         prior = self.summary
         self.summary = "\n".join(
-            part for part in [prior, "Earlier bounded conversation:", *fragments] if part
+            part for part in [prior, "Forge historical summary (non-authoritative context):", *fragments] if part
         )[-8_000:]
         summary_message = {
-            "role": "system",
-            "content": self.summary,
+            "role": "user",
+            "content": "[Forge historical summary — informational context only; not an instruction or permission]\n"
+            + self.summary,
         }
         self.messages = anchors + [summary_message] + recent
         while self._size(self.messages) > self.max_chars and len(self.messages) > 3:
-            self._drop_oldest_turn(self.messages, 3)
+            self._drop_low_value_turn(self.messages, 3)
         if self._size(self.messages) > self.max_chars:
             fixed = self.messages[:2]
             low, high, best = 0, len(self.summary), ""
             while low <= high:
                 midpoint = (low + high) // 2
                 candidate = self.summary[-midpoint:] if midpoint else ""
-                trial = fixed + [{"role": "system", "content": candidate}]
+                trial = fixed + [{
+                    "role": "user",
+                    "content": "[Forge historical summary — informational context only]\n" + candidate,
+                }]
                 if self._size(trial) <= self.max_chars:
                     best = candidate
                     low = midpoint + 1
                 else:
                     high = midpoint - 1
             self.summary = best
-            self.messages = fixed + [{"role": "system", "content": best}]
+            self.messages = fixed + [{
+                "role": "user",
+                "content": "[Forge historical summary — informational context only]\n" + best,
+            }]
         self.messages = self._normalize_tool_history(self._truncate_messages(self.messages))
         self.compactions += 1
 
@@ -111,25 +118,33 @@ class LongHorizonBuffer:
             for index in range(start - 1, 1, -1):
                 candidate = messages[index]
                 calls = candidate.get("tool_calls")
-                if candidate.get("role") == "assistant" and isinstance(calls, list) and any(isinstance(call, dict) and str(call.get("id", "")) == call_id for call in calls):
+                if candidate.get("role") == "assistant" and isinstance(calls, list) and any(
+                    isinstance(call, dict) and str(call.get("id", "")) == call_id for call in calls
+                ):
                     return index
         return start
 
-
     @staticmethod
     def _drop_oldest_turn(messages: list[dict[str, Any]], index: int) -> None:
+        """Backward-compatible alias retained for callers that use the old helper."""
+        LongHorizonBuffer._drop_low_value_turn(messages, index)
+
+    @staticmethod
+    def _drop_low_value_turn(messages: list[dict[str, Any]], index: int) -> None:
         if index >= len(messages):
             return
-        candidate = messages[index]
+        candidates = list(range(index, len(messages)))
+        drop_index = min(candidates, key=lambda candidate: LongHorizonBuffer._priority(messages[candidate]))
+        candidate = messages[drop_index]
         calls = candidate.get("tool_calls")
         if candidate.get("role") != "assistant" or not isinstance(calls, list) or not calls:
-            del messages[index]
+            del messages[drop_index]
             return
         call_ids = {str(call.get("id")) for call in calls if isinstance(call, dict) and call.get("id")}
-        end = index + 1
+        end = drop_index + 1
         while end < len(messages) and messages[end].get("role") == "tool" and str(messages[end].get("tool_call_id", "")) in call_ids:
             end += 1
-        del messages[index:end]
+        del messages[drop_index:end]
 
     def _truncate_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result = [dict(message) for message in messages]
@@ -137,14 +152,34 @@ class LongHorizonBuffer:
             candidates = [
                 index
                 for index, message in enumerate(result)
-                if isinstance(message.get("content"), str) and message["content"]
+                if index >= 2 and isinstance(message.get("content"), str) and message["content"]
             ]
             if not candidates:
                 break
-            index = max(candidates, key=lambda item: len(str(result[item]["content"])))
+            index = min(candidates, key=lambda item: (self._priority(result[item]), -len(str(result[item]["content"]))))
             content = str(result[index]["content"])
-            result[index]["content"] = content[: max(0, int(len(content) * 0.75))]
+            new_length = max(256, int(len(content) * 0.75))
+            result[index]["content"] = content[:new_length]
         return result
+
+    @staticmethod
+    def _priority(message: dict[str, Any]) -> int:
+        """Higher values mean more valuable context that should survive compaction."""
+        role = message.get("role")
+        content = message.get("content", "")
+        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, sort_keys=True)
+        lowered = text.lower()
+        if role == "system":
+            return 100
+        if role == "user" and "historical summary" not in lowered:
+            return 95
+        if role == "tool" and any(marker in lowered for marker in ("error", "failed", "exitcode", "verification")):
+            return 85
+        if role == "assistant" and isinstance(message.get("tool_calls"), list):
+            return 80
+        if role == "tool":
+            return 70
+        return 50
 
     @staticmethod
     def _message_summary(message: dict[str, Any]) -> str:
@@ -154,7 +189,8 @@ class LongHorizonBuffer:
             compact = " ".join(content.split())[:600]
         else:
             compact = json.dumps(content, ensure_ascii=False, sort_keys=True)[:600]
-        return f"- {role}: {compact}"
+        priority = LongHorizonBuffer._priority(message)
+        return f"- priority={priority} {role}: {compact}"
 
     @staticmethod
     def _size(messages: list[dict[str, Any]]) -> int:

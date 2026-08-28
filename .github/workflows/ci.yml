@@ -19,6 +19,16 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
+      - name: Verify packed install
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/forge-prefix"
+          npm pack --pack-destination "$RUNNER_TEMP"
+          archive="$(find "$RUNNER_TEMP" -maxdepth 1 -name 'forge-cli-workspace-*.tgz' -print -quit)"
+          test -n "$archive"
+          npm install --prefix "$RUNNER_TEMP/forge-prefix" "$archive"
+          "$RUNNER_TEMP/forge-prefix/node_modules/.bin/forge" --version
+          "$RUNNER_TEMP/forge-prefix/node_modules/.bin/forge" errors
 
   python:
     runs-on: ubuntu-latest

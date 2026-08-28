@@ -3,7 +3,6 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import readline from "node:readline";
-import { normalizeExecutionPrompt } from "./prompt-intent.mjs";
 
 const packageRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -17,72 +16,73 @@ const entrypoint = path.join(
   "src",
   "main.js",
 );
-const simpleMode = process.argv.includes("--simple");
+const argv = process.argv.slice(2);
+const simpleMode = argv.includes("--simple");
 
-function normalizeArgv(argv) {
-  const normalized = [...argv];
-  const command = normalized[0] ?? "";
-  let promptIndex = -1;
-
-  if (command === "run") {
-    for (let index = 1; index < normalized.length; index += 1) {
-      if (normalized[index] === "--prompt" && index + 1 < normalized.length) {
-        promptIndex = index + 1;
-        break;
-      }
-      if (normalized[index]?.startsWith("--prompt=")) {
-        promptIndex = index;
-        break;
-      }
-    }
-  } else if (!command.startsWith("--")) {
-    promptIndex = 0;
+function normalizedArgv(args) {
+  if (!simpleMode) return args;
+  const result = [...args];
+  if (!result.includes("--output") && !result.some((value) => value.startsWith("--output="))) {
+    result.push("--output", "json");
   }
-
-  if (promptIndex < 0) return normalized;
-  if (normalized[promptIndex]?.startsWith("--prompt=")) {
-    const value = normalized[promptIndex].slice("--prompt=".length);
-    const rewritten = normalizeExecutionPrompt(value);
-    if (rewritten !== value) normalized[promptIndex] = `--prompt=${rewritten}`;
-    return normalized;
-  }
-
-  const value = normalized[promptIndex];
-  if (typeof value === "string") {
-    const rewritten = normalizeExecutionPrompt(value);
-    if (rewritten !== value) normalized[promptIndex] = rewritten;
-  }
-  return normalized;
+  return result;
 }
 
-const child = spawn(process.execPath, [entrypoint, ...normalizeArgv(process.argv.slice(2))], {
+function renderSimpleEvent(event) {
+  if (!event || typeof event !== "object") return false;
+  switch (event.type) {
+    case "agent.text":
+      process.stdout.write(`${String(event.text ?? "").trim()}\n`);
+      return true;
+    case "tool.proposal":
+      process.stdout.write(`\n[proposal] ${event.tool}: ${event.reason}\n`);
+      return true;
+    case "approval.result":
+      process.stdout.write(`[approval] ${event.decision}\n`);
+      return true;
+    case "tool.result": {
+      const status = event.ok ? "ok" : "failed";
+      process.stdout.write(`[tool ${status}] ${event.tool}`);
+      if (event.error?.message) process.stdout.write(` — ${String(event.error.message)}`);
+      process.stdout.write("\n");
+      return true;
+    }
+    case "agent.repair":
+      process.stdout.write(`\n[repair ${event.status}] attempt ${event.attempt}/${event.maxAttempts} — ${event.reason}\n`);
+      return true;
+    case "agent.delegation":
+      process.stdout.write(`[specialist] ${String(event.role ?? event.roleId ?? "unknown")} — ${String(event.status ?? "completed")}\n`);
+      return true;
+    case "session.complete":
+      process.stdout.write(`\n[complete ${event.status}] ${String(event.summary ?? "")}\n`);
+      if (Array.isArray(event.changedFiles) && event.changedFiles.length) {
+        process.stdout.write(`Changed files: ${event.changedFiles.join(", ")}\n`);
+      }
+      return true;
+    case "error":
+      process.stdout.write(`[error] ${String(event.error?.code ?? "UNKNOWN")}: ${String(event.error?.message ?? "Unknown error")}\n`);
+      return true;
+    default:
+      return event.type !== undefined;
+  }
+}
+
+const child = spawn(process.execPath, [entrypoint, ...normalizedArgv(argv)], {
   stdio: simpleMode ? ["inherit", "pipe", "inherit"] : "inherit",
   windowsHide: true,
 });
 
 if (simpleMode) {
   const rl = readline.createInterface({ input: child.stdout });
-  let skipLines = 0;
   (async () => {
     for await (const rawLine of rl) {
       const line = String(rawLine);
-      if (skipLines > 0) {
-        skipLines -= 1;
-        continue;
+      try {
+        const event = JSON.parse(line);
+        if (renderSimpleEvent(event)) continue;
+      } catch {
+        // Approval prompts and other direct CLI text are intentionally passed through.
       }
-      if (line === "Checklist:") {
-        skipLines = 6;
-        continue;
-      }
-      if (line.startsWith("[forge state]")) {
-        skipLines = 5;
-        continue;
-      }
-      if (line.startsWith("Dependency graph:")) {
-        skipLines = 1;
-        continue;
-      }
-      if (line.startsWith("Plan artifact:")) continue;
       process.stdout.write(`${line}\n`);
     }
   })().catch((error) => {
