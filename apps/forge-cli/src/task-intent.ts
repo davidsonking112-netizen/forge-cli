@@ -37,7 +37,7 @@ const EXECUTION_PATTERNS = [
   /\b(?:run|execute|test|compile|typecheck|lint|start|launch)\b/i,
 ];
 
-const EXPLICIT_READ_ONLY = /\b(?:read[- ]only|explain|tell me|show me|without changing|without modifying|do not change|don't change)\b/i;
+const EXPLICIT_READ_ONLY = /\b(?:read[- ]only|explain|tell me|show me|without changing|without modifying|do not change|don't change|do not make changes|don't make changes)\b/i;
 
 export function classifyTaskIntent(prompt: string): TaskIntent {
   const normalized = prompt.trim();
@@ -54,13 +54,17 @@ export function classifyTaskIntent(prompt: string): TaskIntent {
   const proposal = PROPOSAL_PATTERNS.some((pattern) => pattern.test(normalized));
   const mutationRequested = MUTATION_PATTERNS.some((pattern) => pattern.test(normalized));
   const explicitReadOnly = EXPLICIT_READ_ONLY.test(normalized);
-  if (proposal || (explicitReadOnly && mutationRequested)) {
+
+  // Explicit non-mutating language wins over incidental mutation vocabulary.
+  if (proposal || explicitReadOnly) {
     return {
-      mode: "proposal",
-      requiresApproval: true,
+      mode: proposal ? "proposal" : "inspect",
+      requiresApproval: proposal,
       allowsMutation: false,
-      allowsLocalExecution: false,
-      rationale: "The request asks for recommendations or explicitly limits execution before approval.",
+      allowsLocalExecution: !proposal && EXECUTION_PATTERNS.some((pattern) => pattern.test(normalized)),
+      rationale: proposal
+        ? "The request asks for recommendations or a proposed change without granting mutation authority."
+        : "The request explicitly limits workspace mutation.",
     };
   }
 
