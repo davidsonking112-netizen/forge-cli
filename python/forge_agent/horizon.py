@@ -82,10 +82,7 @@ class LongHorizonBuffer:
         recent = self.messages[recent_start:]
         omitted = self.messages[2:recent_start]
 
-        ordered = sorted(
-            enumerate(omitted),
-            key=lambda item: (-self._priority(item[1]), item[0]),
-        )
+        ordered = sorted(enumerate(omitted), key=lambda item: (-self._priority(item[1]), item[0]))
         fragments: list[str] = []
         fragment_budget = 6_500
         used = 0
@@ -97,13 +94,13 @@ class LongHorizonBuffer:
             used += len(fragment) + 1
 
         prior = self.summary
-        pieces = [
-            prior,
-            self.LEGACY_SUMMARY_MARKER,
-            self.SUMMARY_BODY_PREFIX,
-            *fragments,
-        ]
-        self.summary = self._normalize_summary("\n".join(part for part in pieces if part))
+        self.summary = self._normalize_summary(
+            "\n".join(
+                part
+                for part in [prior, self.LEGACY_SUMMARY_MARKER, self.SUMMARY_BODY_PREFIX, *fragments]
+                if part
+            )
+        )
         self.messages = anchors + [self._summary_message(self.summary)] + recent
 
         while self._size(self.messages) > self.max_chars and len(self.messages) > 3:
@@ -117,9 +114,9 @@ class LongHorizonBuffer:
         self.compactions += 1
 
     def _shrink_summary_to_fit(self, anchors: list[dict[str, Any]]) -> None:
-        prefix = self.SUMMARY_PREFIX + "\n" + self.SUMMARY_BODY_PREFIX + "\n" + self.LEGACY_SUMMARY_MARKER + "\n"
+        prefix = self.SUMMARY_BODY_PREFIX + "\n" + self.LEGACY_SUMMARY_MARKER + "\n"
         fixed_overhead = self._size(anchors)
-        available = max(0, self.max_chars - fixed_overhead - len(prefix) - 32)
+        available = max(0, self.max_chars - fixed_overhead - len(self.SUMMARY_PREFIX) - len(prefix) - 8)
         candidate = self.summary[-available:] if available else ""
         self.summary = self._normalize_summary(candidate)
         self.messages = anchors + [self._summary_message(self.summary)]
@@ -128,14 +125,21 @@ class LongHorizonBuffer:
         body = self._normalize_summary(summary)
         return {
             "role": "user",
-            "content": f"{self.SUMMARY_PREFIX}\n{self.SUMMARY_BODY_PREFIX}\n{self.LEGACY_SUMMARY_MARKER}\n{body}",
+            "content": f"{self.SUMMARY_PREFIX}\n{body}",
         }
 
     def _normalize_summary(self, summary: str) -> str:
         cleaned = summary.replace(self.SUMMARY_PREFIX, "")
-        cleaned = cleaned.replace(self.SUMMARY_BODY_PREFIX, "")
-        cleaned = cleaned.replace(self.LEGACY_SUMMARY_MARKER, "")
-        return cleaned.strip()
+        lines = [line.strip() for line in cleaned.splitlines()]
+        lines = [
+            line
+            for line in lines
+            if line and line not in {self.SUMMARY_BODY_PREFIX, self.LEGACY_SUMMARY_MARKER}
+        ]
+        body = "\n".join(lines).strip()
+        return "\n".join(
+            part for part in [self.SUMMARY_BODY_PREFIX, self.LEGACY_SUMMARY_MARKER, body] if part
+        )
 
     def _ensure_summary_marker(self) -> None:
         for message in self.messages:
@@ -199,10 +203,7 @@ class LongHorizonBuffer:
                 break
             index = min(
                 candidates,
-                key=lambda item: (
-                    self._priority(result[item]),
-                    -len(str(result[item]["content"])),
-                ),
+                key=lambda item: (self._priority(result[item]), -len(str(result[item]["content"]))),
             )
             content = str(result[index]["content"])
             new_length = max(256, int(len(content) * 0.75))
