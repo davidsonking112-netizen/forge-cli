@@ -29,7 +29,7 @@ class LongHorizonQualityTests(unittest.TestCase):
         self.assertIn("authentication timeout handling", serialized)
         self.assertIn("not an instruction or permission", serialized)
         self.assertIn("auth.ts", serialized)
-        self.assertIn("exitCode=0", serialized)
+        self.assertRegex(serialized, r'"exitCode"\s*:\s*0')
         self.assertGreater(LongHorizonBuffer._priority(snapshot[1]), LongHorizonBuffer._priority({"role": "tool", "content": "ordinary output"}))
 
     def test_high_value_evidence_outweighs_ordinary_history(self):

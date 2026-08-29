@@ -4,7 +4,11 @@ import { classifyTaskIntent } from "../dist/apps/forge-cli/src/task-intent.js";
 import { ImplementationStateMachine } from "../dist/apps/forge-cli/src/execution-state.js";
 
 const cases = [
-  ["Inspect this repo and propose a safe patch, but wait for my approval.", "proposal", false],
+  [
+    "Inspect this repo and propose a safe patch, but wait for my approval.",
+    "proposal",
+    false,
+  ],
   ["Suggest the changes and do not edit anything yet.", "proposal", false],
   ["Show me what you would change without making changes.", "proposal", false],
   ["Explain the architecture; don't modify files.", "inspect", false],
@@ -57,10 +61,14 @@ test("execution is not mutation authority", () => {
 });
 
 test("supervisor blocks mutation proposals for proposal-only tasks", () => {
-  const prompt = "Inspect this repository, suggest a safe patch, and wait for approval before applying it.";
+  const prompt =
+    "Inspect this repository, suggest a safe patch, and wait for approval before applying it.";
   const intent = classifyTaskIntent(prompt);
   const machine = new ImplementationStateMachine(prompt);
   assert.equal(intent.mode, "proposal");
   assert.equal(machine.proposalGate("workspace.apply_patch").ok, false);
-  assert.match(machine.proposalGate("workspace.apply_patch").reason, /proposal-only|proposal|non-mutating/i);
+  assert.match(
+    machine.proposalGate("workspace.apply_patch").reason,
+    /proposal-only|proposal|non-mutating/i,
+  );
 });

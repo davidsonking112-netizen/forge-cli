@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
-export type TaskStatus = "pending" | "running" | "completed" | "failed" | "blocked" | "cancelled";
+export type TaskStatus =
+  "pending" | "running" | "completed" | "failed" | "blocked" | "cancelled";
 
 export interface TaskArtifact {
   findings: string[];
@@ -41,17 +42,19 @@ function cloneNode(node: TaskNode): TaskNode {
   return {
     ...node,
     dependsOn: [...node.dependsOn],
-    artifact: node.artifact
+    ...(node.artifact
       ? {
-          ...node.artifact,
-          findings: [...node.artifact.findings],
-          evidence: [...node.artifact.evidence],
-          validation: [...node.artifact.validation],
-          edgeCasesConsidered: [...node.artifact.edgeCasesConsidered],
-          openQuestions: [...node.artifact.openQuestions],
-          whatWasNotChecked: [...node.artifact.whatWasNotChecked],
+          artifact: {
+            ...node.artifact,
+            findings: [...node.artifact.findings],
+            evidence: [...node.artifact.evidence],
+            validation: [...node.artifact.validation],
+            edgeCasesConsidered: [...node.artifact.edgeCasesConsidered],
+            openQuestions: [...node.artifact.openQuestions],
+            whatWasNotChecked: [...node.artifact.whatWasNotChecked],
+          },
         }
-      : undefined,
+      : {}),
   };
 }
 
@@ -62,7 +65,8 @@ export class TaskGraph {
     const id = input.id ?? `task_${randomUUID()}`;
     if (this.nodes.has(id)) throw new Error(`Task already exists: ${id}`);
     for (const dependency of input.dependsOn ?? []) {
-      if (!this.nodes.has(dependency)) throw new Error(`Unknown dependency: ${dependency}`);
+      if (!this.nodes.has(dependency))
+        throw new Error(`Unknown dependency: ${dependency}`);
     }
     const node: TaskNode = {
       id,
@@ -82,7 +86,8 @@ export class TaskGraph {
   }
 
   expandTask(parentId: string, children: AddTaskInput[]): TaskNode[] {
-    if (!this.nodes.has(parentId)) throw new Error(`Unknown parent task: ${parentId}`);
+    if (!this.nodes.has(parentId))
+      throw new Error(`Unknown parent task: ${parentId}`);
     const created: TaskNode[] = [];
     try {
       for (const child of children) {
@@ -100,7 +105,11 @@ export class TaskGraph {
   runnable(): TaskNode[] {
     return [...this.nodes.values()]
       .filter((node) => node.status === "pending")
-      .filter((node) => node.dependsOn.every((id) => this.nodes.get(id)?.status === "completed"))
+      .filter((node) =>
+        node.dependsOn.every(
+          (id) => this.nodes.get(id)?.status === "completed",
+        ),
+      )
       .map(cloneNode);
   }
 
@@ -110,15 +119,18 @@ export class TaskGraph {
       throw new Error(`Task is not runnable: ${id}`);
     }
     node.status = "running";
-    node.owner = owner;
+    if (owner === undefined) delete node.owner;
+    else node.owner = owner;
     node.updatedAt = new Date().toISOString();
     return cloneNode(node);
   }
 
   complete(id: string, artifact: TaskArtifact): TaskNode {
     const node = this.require(id);
-    if (node.status !== "running") throw new Error(`Only running tasks can complete: ${id}`);
-    if (artifact.confidence < 0 || artifact.confidence > 1) throw new Error("Artifact confidence must be between 0 and 1");
+    if (node.status !== "running")
+      throw new Error(`Only running tasks can complete: ${id}`);
+    if (artifact.confidence < 0 || artifact.confidence > 1)
+      throw new Error("Artifact confidence must be between 0 and 1");
     if (artifact.evidence.length === 0 && artifact.validation.length === 0) {
       throw new Error(`Task completion requires evidence or validation: ${id}`);
     }
@@ -138,7 +150,8 @@ export class TaskGraph {
 
   cancel(id: string): TaskNode {
     const node = this.require(id);
-    if (node.status === "completed") throw new Error(`Completed task cannot be cancelled: ${id}`);
+    if (node.status === "completed")
+      throw new Error(`Completed task cannot be cancelled: ${id}`);
     node.status = "cancelled";
     node.updatedAt = new Date().toISOString();
     return cloneNode(node);
@@ -147,10 +160,15 @@ export class TaskGraph {
   blocked(): TaskNode[] {
     return [...this.nodes.values()]
       .filter((node) => node.status === "pending")
-      .filter((node) => node.dependsOn.some((id) => {
-        const dependency = this.nodes.get(id);
-        return dependency?.status === "failed" || dependency?.status === "cancelled";
-      }))
+      .filter((node) =>
+        node.dependsOn.some((id) => {
+          const dependency = this.nodes.get(id);
+          return (
+            dependency?.status === "failed" ||
+            dependency?.status === "cancelled"
+          );
+        }),
+      )
       .map((node) => {
         const next = this.nodes.get(node.id)!;
         next.status = "blocked";
@@ -164,21 +182,29 @@ export class TaskGraph {
     return {
       version: 1,
       nodes,
-      edges: nodes.flatMap((node) => node.dependsOn.map((from) => ({ from, to: node.id }))),
+      edges: nodes.flatMap((node) =>
+        node.dependsOn.map((from) => ({ from, to: node.id })),
+      ),
     };
   }
 
   static fromSnapshot(snapshot: TaskGraphSnapshot): TaskGraph {
-    if (snapshot.version !== 1) throw new Error(`Unsupported task graph version: ${snapshot.version}`);
+    if (snapshot.version !== 1)
+      throw new Error(`Unsupported task graph version: ${snapshot.version}`);
     const graph = new TaskGraph();
     for (const node of snapshot.nodes) {
-      if (graph.nodes.has(node.id)) throw new Error(`Duplicate task id: ${node.id}`);
+      if (graph.nodes.has(node.id))
+        throw new Error(`Duplicate task id: ${node.id}`);
       graph.nodes.set(node.id, cloneNode(node));
     }
-    if (graph.hasCycle()) throw new Error("Snapshot contains a dependency cycle");
+    if (graph.hasCycle())
+      throw new Error("Snapshot contains a dependency cycle");
     for (const node of graph.nodes.values()) {
       for (const dependency of node.dependsOn) {
-        if (!graph.nodes.has(dependency)) throw new Error(`Snapshot references missing dependency: ${dependency}`);
+        if (!graph.nodes.has(dependency))
+          throw new Error(
+            `Snapshot references missing dependency: ${dependency}`,
+          );
       }
     }
     return graph;

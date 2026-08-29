@@ -1,9 +1,5 @@
 export type TaskIntentMode =
-  | "answer"
-  | "inspect"
-  | "plan"
-  | "proposal"
-  | "mutation";
+  "answer" | "inspect" | "plan" | "proposal" | "mutation";
 
 export interface TaskIntent {
   mode: TaskIntentMode;
@@ -15,21 +11,25 @@ export interface TaskIntent {
   rationale: string;
 }
 
-const MUTATION_WORDS = /\b(?:create|write|edit|modify|change|delete|remove|apply|fix|patch|implement|build|refactor|rename|move|install|migrate|commit|stage)\b/i;
-const EXECUTION_WORDS = /\b(?:run|execute|test|compile|typecheck|lint|start|launch)\b/i;
-const INSPECTION_WORDS = /\b(?:inspect|review|analy[sz]e|audit|examine|investigate|find|locate|understand|show|tell|explain)\b/i;
-const PLAN_WORDS = /\b(?:plan|design|architect|strategy|approach|outline)\b/i;
+const MUTATION_WORDS =
+  /\b(?:create|write|edit|modify|change|delete|remove|apply|fix|patch|implement|build|refactor|rename|move|install|migrate|commit|stage)\b/i;
+const EXECUTION_WORDS =
+  /\b(?:run|execute|test|compile|typecheck|lint|start|launch)\b/i;
+const INSPECTION_WORDS =
+  /\b(?:inspect|review|analy[sz]e|audit|examine|investigate|find|locate|understand|show|tell|explain)\b/i;
+const PLAN_WORDS =
+  /\b(?:plan|design|architect|strategy|approach|outline)\b|\bhow\s+(?:we\s+should|to)\b/i;
 
 const PROPOSAL_PHRASES = [
-  /\b(?:propose|suggest|recommend)\b[\s\S]{0,240}\b(?:change|patch|fix|implementation|improvement)\b/i,
-  /\b(?:wait|await)\b[\s\S]{0,120}\b(?:approval|approve|permission)\b/i,
+  /\b(?:propose|suggest|recommend)\b[\s\S]{0,240}\b(?:change|changes|patch|fix|implementation|improvement)\b/i,
+  /\b(?:wait|await|after|once)\b[\s\S]{0,120}\b(?:approval|approve|permission)\b/i,
   /\b(?:what|which)\b[\s\S]{0,120}\b(?:would you change|should be changed|would you fix)\b/i,
-  /\b(?:show|give|provide)\b[\s\S]{0,120}\b(?:a patch|the changes|the diff)\b[\s\S]{0,120}\b(?:before|without)\b/i,
+  /\b(?:show|give|provide)\b[\s\S]{0,120}\b(?:a patch|the changes|the diff|what you would change)\b[\s\S]{0,120}\b(?:before|without)\b/i,
 ];
 
 const READ_ONLY_PHRASES = [
   /\b(?:read[- ]only)\b/i,
-  /\b(?:without|before)\b[\s\S]{0,80}\b(?:changing|modifying|editing|writing|applying|executing|running|creating|deleting)\b/i,
+  /\b(?:without|before)\b[\s\S]{0,80}\b(?:changing|making\s+changes|modifying|editing|writing|applying|executing|running|creating|deleting)\b/i,
   /\b(?:do not|don't|never)\b[\s\S]{0,80}\b(?:change|modify|edit|write|apply|execute|run|create|delete|implement|fix|refactor)\b/i,
   /\b(?:just|only)\b[\s\S]{0,40}\b(?:explain|inspect|review|analy[sz]e|show|tell|find|understand)\b/i,
 ];
@@ -79,9 +79,15 @@ export function classifyTaskIntent(prompt: string): TaskIntent {
   const hasExecution = EXECUTION_WORDS.test(normalized);
   const hasInspection = INSPECTION_WORDS.test(normalized);
   const hasPlan = PLAN_WORDS.test(normalized);
-  const hasProposal = PROPOSAL_PHRASES.some((pattern) => pattern.test(normalized));
-  const hasReadOnly = READ_ONLY_PHRASES.some((pattern) => pattern.test(normalized));
-  const hasPositiveMutation = POSITIVE_MUTATION_PHRASES.some((pattern) => pattern.test(normalized));
+  const hasProposal = PROPOSAL_PHRASES.some((pattern) =>
+    pattern.test(normalized),
+  );
+  const hasReadOnly = READ_ONLY_PHRASES.some((pattern) =>
+    pattern.test(normalized),
+  );
+  const hasPositiveMutation = POSITIVE_MUTATION_PHRASES.some((pattern) =>
+    pattern.test(normalized),
+  );
 
   if (hasProposal) signals.push("proposal-language");
   if (hasReadOnly) signals.push("explicit-read-only");
@@ -114,6 +120,15 @@ export function classifyTaskIntent(prompt: string): TaskIntent {
     );
   }
 
+  if (hasPlan && !hasPositiveMutation) {
+    return result(
+      "plan",
+      "explicit",
+      signals,
+      "The request asks for planning or design rather than workspace mutation.",
+    );
+  }
+
   if (hasPositiveMutation && hasMutation) {
     return result(
       "mutation",
@@ -124,16 +139,7 @@ export function classifyTaskIntent(prompt: string): TaskIntent {
     );
   }
 
-  if (hasPlan && !hasMutation) {
-    return result(
-      "plan",
-      "explicit",
-      signals,
-      "The request asks for planning or design rather than workspace mutation.",
-    );
-  }
-
-  if (hasInspection && !hasMutation) {
+  if (hasInspection && !hasPositiveMutation) {
     return result(
       "inspect",
       "inferred",

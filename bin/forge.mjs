@@ -22,7 +22,10 @@ const simpleMode = argv.includes("--simple");
 function normalizedArgv(args) {
   if (!simpleMode) return args;
   const result = [...args];
-  if (!result.includes("--output") && !result.some((value) => value.startsWith("--output="))) {
+  if (
+    !result.includes("--output") &&
+    !result.some((value) => value.startsWith("--output="))
+  ) {
     result.push("--output", "json");
   }
   return result;
@@ -43,24 +46,35 @@ function renderSimpleEvent(event) {
     case "tool.result": {
       const status = event.ok ? "ok" : "failed";
       process.stdout.write(`[tool ${status}] ${event.tool}`);
-      if (event.error?.message) process.stdout.write(` — ${String(event.error.message)}`);
+      if (event.error?.message)
+        process.stdout.write(` — ${String(event.error.message)}`);
       process.stdout.write("\n");
       return true;
     }
     case "agent.repair":
-      process.stdout.write(`\n[repair ${event.status}] attempt ${event.attempt}/${event.maxAttempts} — ${event.reason}\n`);
+      process.stdout.write(
+        `\n[repair ${event.status}] attempt ${event.attempt}/${event.maxAttempts} — ${event.reason}\n`,
+      );
       return true;
     case "agent.delegation":
-      process.stdout.write(`[specialist] ${String(event.role ?? event.roleId ?? "unknown")} — ${String(event.status ?? "completed")}\n`);
+      process.stdout.write(
+        `[specialist] ${String(event.role ?? event.roleId ?? "unknown")} — ${String(event.status ?? "completed")}\n`,
+      );
       return true;
     case "session.complete":
-      process.stdout.write(`\n[complete ${event.status}] ${String(event.summary ?? "")}\n`);
+      process.stdout.write(
+        `\n[complete ${event.status}] ${String(event.summary ?? "")}\n`,
+      );
       if (Array.isArray(event.changedFiles) && event.changedFiles.length) {
-        process.stdout.write(`Changed files: ${event.changedFiles.join(", ")}\n`);
+        process.stdout.write(
+          `Changed files: ${event.changedFiles.join(", ")}\n`,
+        );
       }
       return true;
     case "error":
-      process.stdout.write(`[error] ${String(event.error?.code ?? "UNKNOWN")}: ${String(event.error?.message ?? "Unknown error")}\n`);
+      process.stdout.write(
+        `[error] ${String(event.error?.code ?? "UNKNOWN")}: ${String(event.error?.message ?? "Unknown error")}\n`,
+      );
       return true;
     default:
       return event.type !== undefined;
