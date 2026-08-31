@@ -70,6 +70,7 @@ Usage:
   forge config show|path|set <key> <v>   Inspect or update local configuration
   forge prompt show|set|clear            Manage an optional user system prompt
   forge session list|recovery|resume|export|delete Manage local sessions
+  forge continue [session-id]             Continue the latest or specified interrupted session
   forge verify <session-id>                 Inspect structured verification evidence
   forge audit <session-id>                   Review a redacted safety event log
   forge undo <checkpoint-id>              Restore a Forge-managed checkpoint
@@ -134,6 +135,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     "config",
     "prompt",
     "session",
+    "continue",
     "inspect",
     "audit",
     "verify",
@@ -1134,6 +1136,22 @@ async function sessionCommand(args: ParsedArgs): Promise<number> {
     return assessment.decision === "manual-intervention" ? 2 : 0;
   }
   if (action === "resume") {
+    if (record.status === "completed") {
+      const completion = [...record.events]
+        .reverse()
+        .find((event) => event.type === "session.complete");
+      console.log("This session is already complete.");
+      if (completion?.type === "session.complete") {
+        console.log(`\nSummary: ${completion.summary}`);
+        if (completion.changedFiles.length)
+          console.log(`Files: ${completion.changedFiles.join(", ")}`);
+        if (completion.checks.length)
+          console.log(
+            `Checks: ${completion.checks.map((check) => check.status).join(", ")}`,
+          );
+      }
+      return 0;
+    }
     const start = record.events.find((event) => event.type === "session.start");
     if (!start || start.type !== "session.start" || !start.prompt) {
       console.error("This session does not contain a resumable prompt");
@@ -2697,6 +2715,19 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (args.command === "config") return configCommand(args);
   if (args.command === "prompt") return promptCommand(args);
   if (args.command === "session") return sessionCommand(args);
+  if (args.command === "continue") {
+    const sessions = await new ForgeSupervisor().listSessions();
+    const id = args.positional[0] ?? sessions[0]?.id;
+    if (!id) {
+      console.error("No Forge session is available to continue.");
+      return 1;
+    }
+    return sessionCommand({
+      ...args,
+      command: "session",
+      positional: ["resume", id],
+    });
+  }
   if (args.command === "inspect") return inspectCommand(args);
   if (args.command === "audit") return auditCommand(args);
   if (args.command === "verify") return verifyCommand(args);

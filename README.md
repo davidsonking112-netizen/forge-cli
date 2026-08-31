@@ -117,6 +117,28 @@ forge setup
 
 Forge uses concise line-by-line output by default. Use `--verbose` for internal phases, artifacts, budgets, and detailed diagnostics, `--output json` for machine-readable events, or `--ui tui` for the optional full-screen terminal interface.
 
+Provider failures are retried with a visible bounded wait. Configure the response timeout, retry count, and wait interval when using a slow or busy provider:
+
+```powershell
+$env:FORGE_PROVIDER_TIMEOUT = "180"
+$env:FORGE_PROVIDER_RETRIES = "4"
+$env:FORGE_PROVIDER_RETRY_WAIT = "30"
+```
+
+Forge stops after five total provider attempts and reports the failure rather than retrying forever. If a session stops or fails, continue the latest saved session with:
+
+```powershell
+forge continue
+```
+
+To continue a specific session:
+
+```powershell
+forge continue <session-id>
+```
+
+If the session is already complete, Forge prints its stored summary, changed files, and checks instead of replaying the task. Continuation still re-checks the workspace and preserves all approval and safety gates.
+
 ```bash
 FORGE_PROVIDER=openai-compatible \
 FORGE_API_KEY=your-key \

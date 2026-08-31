@@ -272,6 +272,29 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(completion["status"], "failed")
         self.assertIn("no text", completion["summary"])
 
+    def test_provider_errors_retry_five_times_then_fail(self):
+        class FailingProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, *, messages, tools, on_text=None):
+                del messages, tools, on_text
+                self.calls += 1
+                raise RuntimeError("Provider HTTP 503: temporarily unavailable")
+
+        provider = FailingProvider()
+        agent = MockAgent("provider-retry")
+        agent.provider = provider
+        agent.prompt = "Inspect the repository."
+        agent.horizon = LongHorizonBuffer(max_chars=10_000, max_messages=32)
+        with mock.patch.dict(os.environ, {"FORGE_PROVIDER_RETRY_WAIT": "0"}, clear=False):
+            events = agent.provider_turn()
+
+        self.assertEqual(provider.calls, 5)
+        completion = next(item for item in events if item.get("type") == "session.complete")
+        self.assertEqual(completion["status"], "failed")
+        self.assertIn("repair budget", completion["summary"])
+
     def test_provider_recovers_bounded_text_only_implementation_responses(self):
         class TextOnlyProvider:
             def __init__(self):

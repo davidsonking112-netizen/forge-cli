@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -345,7 +346,8 @@ class MockAgent:
         try:
             reply = self.provider.complete(messages=self._snapshot_messages(), tools=TOOL_SCHEMAS, on_text=streamed.append)
         except Exception as exc:
-            return [event("error", self.session_id, error={"code": "PROVIDER_ERROR", "message": redact_error(str(exc)), "retryable": True}), event("session.complete", self.session_id, status="failed", summary="The configured provider failed before the task could complete.", changedFiles=self.changed_files, checks=self.verification_checks)]
+            failure = event("error", self.session_id, error={"code": "PROVIDER_ERROR", "message": redact_error(str(exc)), "retryable": True})
+            return [failure] + self._handle_provider_failure({"ok": False, "error": {"code": "PROVIDER_ERROR", "message": redact_error(str(exc)), "retryable": True}})
         responses: list[dict[str, Any]] = []
         if reply.text and not streamed:
             responses.append(event("agent.text", self.session_id, text=reply.text))
@@ -502,7 +504,12 @@ class MockAgent:
             return events + [event("session.complete", self.session_id, status="failed", summary="The bounded repair budget was exhausted after alternate attempts and one deep-thinking attempt.", changedFiles=self.changed_files, checks=self.verification_checks)]
         self.repair_attempts += 1
         strategy = "deep-thinking" if self.repair_attempts == 4 else "alternate"
-        events.append(event("agent.repair", self.session_id, attempt=self.repair_attempts, maxAttempts=4, strategy=strategy, status="started", reason="The prior tool result failed; Forge will request a different bounded approach." if strategy == "alternate" else "Three alternate approaches failed; Forge is making the required final deep-thinking repair attempt."))
+        wait_seconds = max(0, min(int(os.environ.get("FORGE_PROVIDER_RETRY_WAIT", "30")), 300))
+        if wait_seconds:
+            sys.stdout.write(protocol_json(event("agent.text", self.session_id, text=f"Provider unavailable. Waiting {wait_seconds} seconds before retry {self.repair_attempts}/4; no new task will be started.")) + "\n")
+            sys.stdout.flush()
+            time.sleep(wait_seconds)
+        events.append(event("agent.repair", self.session_id, attempt=self.repair_attempts, maxAttempts=4, strategy=strategy, status="started", reason="The prior tool result failed; Forge waited before requesting a different bounded approach." if strategy == "alternate" else "Three alternate approaches failed; Forge waited before making the required final deep-thinking repair attempt."))
         result_content = payload.get("error")
         if self.pending_call is not None:
             # A failed action is eligible for the bounded repair policy. Successful
