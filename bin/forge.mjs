@@ -31,21 +31,35 @@ function normalizedArgv(args) {
   return result;
 }
 
+let pendingText = "";
+
+function flushPendingText() {
+  const text = pendingText.trim();
+  if (text) process.stdout.write(`\n${text}\n`);
+  pendingText = "";
+}
+
 function renderSimpleEvent(event) {
   if (!event || typeof event !== "object") return false;
+  if (event.type === "agent.text") {
+    pendingText += String(event.text ?? "");
+    return true;
+  }
+  flushPendingText();
   switch (event.type) {
-    case "agent.text":
-      process.stdout.write(`${String(event.text ?? "").trim()}\n`);
-      return true;
     case "tool.proposal":
-      process.stdout.write(`\n[proposal] ${event.tool}: ${event.reason}\n`);
+      process.stdout.write(
+        `\n=== ACTION REQUIRED ===\nTool: ${event.tool}\nWhy: ${event.reason}\n`,
+      );
       return true;
     case "approval.result":
       process.stdout.write(`[approval] ${event.decision}\n`);
       return true;
     case "tool.result": {
       const status = event.ok ? "ok" : "failed";
-      process.stdout.write(`[tool ${status}] ${event.tool}`);
+      process.stdout.write(
+        `\n=== TOOL RESULT: ${status.toUpperCase()} ===\n${event.tool}`,
+      );
       if (event.error?.message)
         process.stdout.write(` — ${String(event.error.message)}`);
       process.stdout.write("\n");
@@ -63,17 +77,25 @@ function renderSimpleEvent(event) {
       return true;
     case "session.complete":
       process.stdout.write(
-        `\n[complete ${event.status}] ${String(event.summary ?? "")}\n`,
+        `\n=== RESULT: ${String(event.status ?? "unknown").toUpperCase()} ===\n${String(event.summary ?? "")}\n`,
       );
       if (Array.isArray(event.changedFiles) && event.changedFiles.length) {
         process.stdout.write(
-          `Changed files: ${event.changedFiles.join(", ")}\n`,
+          `Files changed:\n${event.changedFiles.map((file) => `  - ${file}`).join("\n")}\n`,
+        );
+      }
+      if (Array.isArray(event.checks) && event.checks.length) {
+        const passed = event.checks.filter(
+          (check) => check.status === "passed",
+        ).length;
+        process.stdout.write(
+          `Checks: ${passed}/${event.checks.length} passed\n`,
         );
       }
       return true;
     case "error":
       process.stdout.write(
-        `[error] ${String(event.error?.code ?? "UNKNOWN")}: ${String(event.error?.message ?? "Unknown error")}\n`,
+        `\n=== ERROR ===\n${String(event.error?.code ?? "UNKNOWN")}: ${String(event.error?.message ?? "Unknown error")}\n`,
       );
       return true;
     default:
@@ -110,6 +132,7 @@ child.once("error", (error) => {
   process.exitCode = 1;
 });
 child.once("exit", (code, signal) => {
+  if (simpleMode) flushPendingText();
   if (signal) process.exitCode = 128 + (signal === "SIGINT" ? 2 : 15);
   else process.exitCode = code ?? 1;
 });

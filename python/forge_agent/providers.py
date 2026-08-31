@@ -113,10 +113,22 @@ class OpenAICompatibleProvider:
             parameter = self.token_parameter
             if parameter == "auto": parameter = "max_completion_tokens" if self.model.lower().startswith("gpt-5") else "max_tokens"
             body[parameter] = self.max_tokens
-        if self.reasoning_effort: body["reasoning_effort"] = self.reasoning_effort
-        if request_tools: body["tools"] = request_tools
-        request = urllib.request.Request(f"{self.base_url}/chat/completions", data=json.dumps(body).encode("utf-8"), headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json", **self.headers}, method="POST")
+        if self.reasoning_effort:
+            body["reasoning_effort"] = self.reasoning_effort
+        if request_tools:
+            body["tools"] = request_tools
+        reasoning_fallback_used = False
         for attempt in range(self.max_retries + 1):
+            request = urllib.request.Request(
+                f"{self.base_url}/chat/completions",
+                data=json.dumps(body).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                    **self.headers,
+                },
+                method="POST",
+            )
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     if stream_enabled and on_text: return self._read_stream(response, on_text, tool_name_map)
@@ -124,8 +136,13 @@ class OpenAICompatibleProvider:
                 return self._parse_payload(payload, tool_name_map)
             except urllib.error.HTTPError as exc:
                 detail = redact(exc.read().decode("utf-8", errors="replace")[:1000])
+                if exc.code == 400 and "reasoning_effort" in body and not reasoning_fallback_used:
+                    body.pop("reasoning_effort", None)
+                    reasoning_fallback_used = True
+                    continue
                 if exc.code in {408, 409, 429, 500, 502, 503, 504} and attempt < self.max_retries:
-                    time.sleep(min(2 ** attempt, 8)); continue
+                    time.sleep(min(2 ** attempt, 8))
+                    continue
                 raise RuntimeError(f"Provider HTTP {exc.code}: {detail}") from exc
             except (urllib.error.URLError, TimeoutError) as exc:
                 if attempt < self.max_retries: time.sleep(min(2 ** attempt, 8)); continue
@@ -270,7 +287,7 @@ def build_provider() -> Provider:
     if provider_name in {"mock", "test"}: return MockProvider()
     preset = PROVIDER_PRESETS.get(provider_name)
     if provider_name in {"openai", "openai-compatible", "compatible"} or preset:
-        max_tokens = optional_bounded_env_int("FORGE_MAX_TOKENS", 256, 100_000)
+        max_tokens = optional_bounded_env_int("FORGE_MAX_TOKENS", 384, 100_000)
         if preset:
             api_key = next((os.environ.get(name, "") for name in preset["key_envs"] if os.environ.get(name)), "")
             base_url = os.environ.get("FORGE_BASE_URL", preset["base_url"]); model = os.environ.get("FORGE_MODEL", preset["model"])
@@ -278,6 +295,10 @@ def build_provider() -> Provider:
         else:
             api_key = os.environ.get("FORGE_API_KEY") or os.environ.get("OPENAI_API_KEY", ""); base_url = os.environ.get("FORGE_BASE_URL", "https://api.openai.com/v1"); model = os.environ.get("FORGE_MODEL", "gpt-4.1-mini")
         token_parameter = os.environ.get("FORGE_TOKEN_PARAMETER", "auto")
-        if token_parameter not in {"auto", "max_tokens", "max_completion_tokens"}: token_parameter = "auto"
-        return OpenAICompatibleProvider(api_key=api_key, base_url=base_url, model=model, max_tokens=max_tokens, reasoning_effort=os.environ.get("FORGE_REASONING_EFFORT"), max_retries=bounded_env_int("FORGE_PROVIDER_RETRIES", 2, 0, 5), token_parameter=token_parameter, headers={"HTTP-Referer": os.environ.get("FORGE_HTTP_REFERER", ""), "X-OpenRouter-Title": os.environ.get("FORGE_APP_NAME", "Forge CLI")})
+        if token_parameter not in {"auto", "max_tokens", "max_completion_tokens"}:
+            token_parameter = "auto"
+        reasoning_effort = os.environ.get("FORGE_REASONING_EFFORT", "low").strip().lower()
+        if reasoning_effort not in {"low", "medium", "high"}:
+            reasoning_effort = None
+        return OpenAICompatibleProvider(api_key=api_key, base_url=base_url, model=model, max_tokens=max_tokens, reasoning_effort=reasoning_effort, max_retries=bounded_env_int("FORGE_PROVIDER_RETRIES", 2, 0, 5), token_parameter=token_parameter, headers={"HTTP-Referer": os.environ.get("FORGE_HTTP_REFERER", ""), "X-OpenRouter-Title": os.environ.get("FORGE_APP_NAME", "Forge CLI")})
     raise ValueError(f"Unsupported FORGE_PROVIDER: {provider_name}")
