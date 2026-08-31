@@ -255,6 +255,26 @@ export function boundedFlagInt(
     : fallback;
 }
 
+function formatToolArguments(
+  tool: string,
+  args: Record<string, unknown>,
+): string[] {
+  if (tool !== "process.run") return [`Arguments: ${JSON.stringify(args)}`];
+  const command = typeof args.command === "string" ? args.command : "";
+  const commandArgs = Array.isArray(args.args) ? args.args.map(String) : [];
+  const lines = [
+    `Executable: ${command || "(not specified)"}`,
+    `Arguments: ${commandArgs.length ? commandArgs.join(" ") : "(none)"}`,
+  ];
+  if (typeof args.cwd === "string")
+    lines.push(`Working directory: ${args.cwd}`);
+  if (typeof args.timeoutMs === "number")
+    lines.push(`Timeout: ${args.timeoutMs}ms`);
+  if (process.platform === "win32" && /^(npm|npx|pnpm|yarn)$/i.test(command))
+    lines.push("Windows command shim: enabled");
+  return lines;
+}
+
 function renderEvent(event: ForgeEvent, json: boolean, verbose = false): void {
   if (json) {
     process.stdout.write(`${JSON.stringify(event)}\n`);
@@ -352,7 +372,8 @@ function renderEvent(event: ForgeEvent, json: boolean, verbose = false): void {
       );
       console.log(`Risk detail: ${event.risk}`);
       console.log(`Reason: ${event.reason}`);
-      console.log(`Arguments: ${JSON.stringify(event.arguments)}`);
+      for (const line of formatToolArguments(event.tool, event.arguments))
+        console.log(line);
       break;
     case "tool.result":
       console.log(

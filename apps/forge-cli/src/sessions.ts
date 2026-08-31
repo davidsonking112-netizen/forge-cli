@@ -327,15 +327,34 @@ export class SessionStore {
       path.join(this.directory, `${id}.json`),
       "utf8",
     );
-    const record = JSON.parse(content) as SessionRecord;
-    if (!record || record.id !== id || !Array.isArray(record.events))
-      throw new Error("Invalid session record");
+    const record = JSON.parse(content) as Partial<SessionRecord> & {
+      id?: string;
+    };
+    if (!record || record.id !== id) throw new Error("Invalid session record");
+    const status: SessionStatus = [
+      "running",
+      "completed",
+      "failed",
+      "cancelled",
+      "interrupted",
+    ].includes(record.status as SessionStatus)
+      ? (record.status as SessionStatus)
+      : "interrupted";
+    const now = new Date().toISOString();
     return {
       ...record,
-      status: record.status ?? "interrupted",
-      resumeCount: Number.isSafeInteger(record.resumeCount)
-        ? record.resumeCount
-        : 0,
+      id,
+      workspace:
+        typeof record.workspace === "string" ? record.workspace : process.cwd(),
+      createdAt: typeof record.createdAt === "string" ? record.createdAt : now,
+      updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : now,
+      status,
+      events: Array.isArray(record.events) ? record.events : [],
+      resumeCount:
+        typeof record.resumeCount === "number" &&
+        Number.isSafeInteger(record.resumeCount)
+          ? record.resumeCount
+          : 0,
       scratchpad: Array.isArray(record.scratchpad)
         ? record.scratchpad.slice(0, 64).map((item) => ({
             key: String(item.key ?? "").slice(0, 100),
