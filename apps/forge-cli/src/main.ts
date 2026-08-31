@@ -67,31 +67,16 @@ Usage:
   forge setup                             Check provider readiness and show next steps
   forge status [--workspace <path>]         Show compact read-only runtime status
   forge errors                            Print stable exit and error-code reference
-  forge config show|path|set <key> <v>   Inspect or update local configuration
-  forge prompt show|set|clear            Manage an optional user system prompt
-  forge session list|recovery|resume|export|delete Manage local sessions
   forge continue [session-id]             Continue the latest or specified interrupted session
-  forge verify <session-id>                 Inspect structured verification evidence
-  forge audit <session-id>                   Review a redacted safety event log
-  forge undo <checkpoint-id>              Restore a Forge-managed checkpoint
-  forge git status|branch|stage|commit    Use approval-gated local Git workflows
-  forge github status|connect|create|clone|push  Use explicit GitHub workflows
-  forge daytona status|create|cleanup       Use optional Daytona sandboxes
-  forge git prepare-pr [title]            Prepare a local review-ready PR draft
-  forge mcp validate                       Validate MCP config without launching servers
-  forge mcp list|enable|disable|tools|call Use explicitly enabled MCP stdio servers
-  forge review <diff-file>                Inspect a unified diff without applying it
-  forge preview-diff <diff-file>          Preview changes and report conflicts
-  forge apply-diff <diff-file>            Apply a reviewed diff after approval
-                                        (use --only path[,path] for file-level review)
-  forge acp serve                          Adapt local ACP JSON-RPC lines safely
-  forge policy validate <file>             Validate a stricter local policy pack
-  forge policy effective [file]            Show the effective safety restrictions
-  forge policy explain <risk> [tool]       Explain an allow/approval/deny decision
-  forge context <prompt>                   Inspect selected context and checks
-  forge profiles                           List bounded autonomy profiles
-  forge index build|show|query|clear        Manage the opt-in local metadata index
-  forge extensions list|inspect [id] [dir] Validate local extension manifests
+  forge status [--workspace <path>]       Show compact read-only runtime status
+  forge advanced <command>                Use integrations, Git, sessions, policy, and diagnostics
+
+Advanced commands:
+  forge advanced session list|resume|export|delete
+  forge advanced git status|branch|stage|commit|prepare-pr
+  forge advanced github status|connect|create|clone|push
+  forge advanced mcp ... | acp ... | policy ... | index ... | extensions ...
+  forge advanced review|preview-diff|apply-diff|context|profiles|verify|audit|undo
 
 Options:
   --output text|json     Select rendering mode (default: text)
@@ -151,12 +136,14 @@ function parseArgs(argv: string[]): ParsedArgs {
     "profiles",
     "index",
     "extensions",
+    "advanced",
     "git",
     "github",
     "daytona",
     "help",
   ]);
   const command = first && knownCommands.has(first) ? first : "interactive";
+  if (command === "advanced") return parseArgs(rest);
   const args = command === "interactive" ? argv : rest;
   const positional: string[] = [];
   const flags: Record<string, string | boolean> = {};
@@ -543,6 +530,118 @@ async function errorsCommand(args: ParsedArgs): Promise<number> {
   return 0;
 }
 
+function configuredKeyName(provider: string): string {
+  const names: Record<string, string[]> = {
+    requesty: ["REQUESTY_API_KEY"],
+    openrouter: ["OPENROUTER_API_KEY"],
+    groq: ["GROQ_API_KEY"],
+    gemini: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_STUDIO_API_KEY"],
+    google: ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_AI_STUDIO_API_KEY"],
+    "google-ai-studio": [
+      "GEMINI_API_KEY",
+      "GOOGLE_API_KEY",
+      "GOOGLE_AI_STUDIO_API_KEY",
+    ],
+    xai: ["XAI_API_KEY"],
+    openai: ["FORGE_API_KEY", "OPENAI_API_KEY"],
+    "openai-compatible": ["FORGE_API_KEY", "OPENAI_API_KEY"],
+    compatible: ["FORGE_API_KEY", "OPENAI_API_KEY"],
+  };
+  return (
+    (names[provider] ?? ["FORGE_API_KEY", "OPENAI_API_KEY"]).find((name) =>
+      Boolean(process.env[name]),
+    ) ?? ""
+  );
+}
+
+async function probeProvider(
+  provider: string,
+  apiKey: string,
+): Promise<{ ok: boolean; detail: string }> {
+  const defaults: Record<string, { baseUrl: string; model: string }> = {
+    requesty: {
+      baseUrl: "https://router.requesty.ai/v1",
+      model: "openai/gpt-4o-mini",
+    },
+    openrouter: {
+      baseUrl: "https://openrouter.ai/api/v1",
+      model: "openai/gpt-4o-mini",
+    },
+    groq: {
+      baseUrl: "https://api.groq.com/openai/v1",
+      model: "llama-3.3-70b-versatile",
+    },
+    gemini: {
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+      model: "gemini-2.0-flash",
+    },
+    google: {
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+      model: "gemini-2.0-flash",
+    },
+    "google-ai-studio": {
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+      model: "gemini-2.0-flash",
+    },
+    xai: { baseUrl: "https://api.x.ai/v1", model: "grok-3-mini" },
+    "openai-compatible": {
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-4.1-mini",
+    },
+  };
+  const preset = defaults[provider];
+  if (!preset)
+    return {
+      ok: false,
+      detail: `No live health-check preset exists for provider ${provider}.`,
+    };
+  const baseUrl = (process.env.FORGE_BASE_URL || preset.baseUrl).replace(
+    /\/$/,
+    "",
+  );
+  const model = process.env.FORGE_MODEL || preset.model;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: "Reply with OK." }],
+        max_tokens: 4,
+        temperature: 0,
+      }),
+      signal: controller.signal,
+    });
+    if (response.ok)
+      return {
+        ok: true,
+        detail: `Live provider check passed for model ${model}.`,
+      };
+    const body = (await response.text())
+      .replace(
+        /(api[_-]?key|token|password|secret)\\s*[:=]\\s*[^,\\s}]+/gi,
+        "$1=[REDACTED]",
+      )
+      .slice(0, 300);
+    return {
+      ok: false,
+      detail: `Provider returned HTTP ${response.status} for model ${model}: ${body}`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      detail: `Live provider check failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function setupCommand(): Promise<number> {
   const provider = (process.env.FORGE_PROVIDER ?? "mock").toLowerCase();
   const hasKey = Boolean(
@@ -586,9 +685,24 @@ async function setupCommand(): Promise<number> {
     );
     return 1;
   }
+  const key = process.env[configuredKeyName(provider)];
+  if (!key) {
+    console.log(
+      "Status: credential was detected, but the selected key could not be resolved.",
+    );
+    return 1;
+  }
+  console.log("Checking live provider connectivity (10-second timeout)...");
+  const health = await probeProvider(provider, key);
   console.log(
-    "Status: credential detected. Forge will test the provider when a session starts.",
+    `${health.ok ? "Health: PASS" : "Health: FAIL"} — ${health.detail}`,
   );
+  if (!health.ok) {
+    console.log(
+      "Next step: correct the provider, model, quota, or endpoint, then run `forge setup` again.",
+    );
+    return 1;
+  }
   console.log(
     'Next step: forge "Inspect this repository and explain its architecture"',
   );
@@ -2494,6 +2608,72 @@ async function undoCommand(args: ParsedArgs): Promise<number> {
   }
 }
 
+async function runDeterministicLocalTask(
+  prompt: string,
+  workspace: string,
+  json: boolean,
+): Promise<number | undefined> {
+  if (json) return undefined;
+  const normalized = prompt.trim().toLowerCase();
+  let tool:
+    | "workspace.list"
+    | "workspace.read"
+    | "workspace.search"
+    | "git.status"
+    | undefined;
+  let arguments_: Record<string, unknown> = {};
+  let label = "";
+  if (
+    /^(list|show) (the )?top[- ]level files?( in| of)?( this repository| the repository)?[.!?]*$/i.test(
+      prompt.trim(),
+    )
+  ) {
+    tool = "workspace.list";
+    arguments_ = { limit: 120 };
+    label = "top-level files";
+  } else if (
+    /^(read|show|open) (the )?readme(?:\.md)?( and .*)?$/i.test(prompt.trim())
+  ) {
+    tool = "workspace.read";
+    arguments_ = { path: "README.md", maxBytes: 40_000 };
+    label = "README.md";
+  } else if (
+    /^(show|check|print) (the )?git status[.!?]*$/i.test(prompt.trim())
+  ) {
+    tool = "git.status";
+    label = "Git status";
+  } else {
+    const searchMatch = normalized.match(
+      /^(?:search|find) (?:for )?(.+?)(?: in this repository)?[.!?]*$/i,
+    );
+    if (searchMatch?.[1] && searchMatch[1].length <= 120) {
+      tool = "workspace.search";
+      arguments_ = { query: searchMatch[1].trim(), maxResults: 80 };
+      label = `search for ${searchMatch[1].trim()}`;
+    }
+  }
+  if (!tool) return undefined;
+  const result = await new WorkspaceTools(workspace).execute({
+    tool,
+    arguments: arguments_,
+  });
+  if (!result.ok) {
+    console.error(
+      `[LOCAL FAILED] ${label}: ${result.error?.message ?? "operation failed"}`,
+    );
+    return 1;
+  }
+  console.log(`[LOCAL] ${label}`);
+  if (result.output !== undefined)
+    console.log(
+      typeof result.output === "string"
+        ? result.output
+        : JSON.stringify(result.output, null, 2),
+    );
+  console.log(`[DONE] ${label} completed locally; no model request was used.`);
+  return 0;
+}
+
 async function runTask(
   args: ParsedArgs,
   recovery?: RecoveryAssessment,
@@ -2557,6 +2737,15 @@ async function runTask(
       );
       cleanupCancellation();
       return 2;
+    }
+    const localResult = await runDeterministicLocalTask(
+      prompt,
+      workspace,
+      isJson,
+    );
+    if (localResult !== undefined) {
+      cleanupCancellation();
+      return localResult;
     }
   } catch (error) {
     cleanupCancellation();

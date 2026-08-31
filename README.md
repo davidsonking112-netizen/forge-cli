@@ -115,7 +115,12 @@ $env:FORGE_MODEL = 'gpt-4.1-mini'
 forge setup
 ```
 
-Forge uses concise line-by-line output by default. Use `--verbose` for internal phases, artifacts, budgets, and detailed diagnostics, `--output json` for machine-readable events, or `--ui tui` for the optional full-screen terminal interface.
+Forge uses concise line-by-line output by default. Simple deterministic requests such as listing top-level files, reading README.md, searching the repository, and checking Git status are handled locally without a model request; broader interpretation and coding tasks still use the configured provider.
+
+Use `forge setup` to perform a live 10-second provider health check against the configured model. A passing credential check alone is not sufficient: setup now reports model, endpoint, quota, and connectivity failures when the provider responds with them.
+
+The beginner command surface remains at the top level. Integration, policy, Git, session diagnostics, MCP, ACP, indexing, extensions, and diff-management commands are also available through the explicit namespace, for example `forge advanced session list` or `forge advanced policy effective`. Legacy direct forms remain accepted for compatibility.
+Use `--verbose` for internal phases, artifacts, budgets, and detailed diagnostics, `--output json` for machine-readable events, or `--ui tui` for the optional full-screen terminal interface.
 
 Transient provider failures are retried with a visible bounded wait. Use one total-attempt budget so `FORGE_MAX_PROVIDER_ATTEMPTS=1` means exactly one provider attempt:
 
