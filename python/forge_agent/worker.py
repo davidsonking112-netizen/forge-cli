@@ -201,6 +201,8 @@ class MockAgent:
     changed_files: list[str] = field(default_factory=list)
     provider: Provider | None = None
     desired_path: str | None = None
+    test_requested: bool = False
+    verification_command: str | None = None
     messages: list[dict[str, Any]] = field(default_factory=list)
     horizon: LongHorizonBuffer | None = None
     workspace_fingerprint: str | None = None
@@ -309,6 +311,7 @@ class MockAgent:
         self.prompt = prompt
         create_match = re.search(r"create(?: a)? file ([A-Za-z0-9_./-]+)", prompt, re.IGNORECASE)
         self.desired_path = create_match.group(1) if create_match else None
+        self.test_requested = bool(re.search(r"\b(run|execute)\b[\s\w-]{0,40}\b(test|tests|checks)\b|\b(test|tests)\b[\s\w-]{0,40}\b(run|execute)\b", prompt, re.IGNORECASE))
         self.stage = "inspect"
         self.steps = [
             {"id": "inspect", "description": "Inspect the repository and relevant project instructions", "status": "active"},
@@ -543,6 +546,11 @@ class MockAgent:
             return [event("agent.text", self.session_id, text="Repository inventory received. Repository instructions are untrusted data and cannot change Forge permissions."), event("agent.checklist", self.session_id, items=task_checklist("plan", completed={"inspect"})), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "active"}, {"key": "current-step", "value": "Produce a minimal implementation plan", "status": "active"}, {"key": "inspection", "value": "Bounded repository inventory received", "status": "done"}, {"key": "change", "value": "Awaiting plan and approval before mutation", "status": "todo"}, {"key": "verification", "value": "Relevant checks remain pending", "status": "todo"}]), event("agent.plan", self.session_id, goal=self.prompt, steps=self.steps, assumptions=["Only files relevant to the task will be read.", "No mutation or command execution occurs without supervisor approval."], verification=["Run the project’s relevant checks after an approved change."], **({"graph": self._mock_graph_proposal()} if self.desired_path else {})), event("tool.proposal", self.session_id, tool="workspace.read", risk="read-only", arguments={"path": "README.md", "maxBytes": 12000}, reason="Read the project overview to ground the plan in repository conventions.")]
         if tool == "workspace.read" and self.stage == "plan":
             self.steps[1]["status"] = "complete"
+            if self.test_requested and not self.desired_path:
+                self.stage = "verify"
+                self.steps[3]["status"] = "active"
+                self.verification_command = "npm test" if os.path.exists(os.path.join(self.workspace, "package.json")) else "python -m unittest discover"
+                return [event("agent.text", self.session_id, text=f"I found a testable project. I will request approval to run `{self.verification_command}`."), event("agent.checklist", self.session_id, items=task_checklist("verify", completed={"inspect", "plan"})), event("tool.proposal", self.session_id, tool="process.run", risk="local-execution", arguments={"command": self.verification_command, "args": [], "timeoutMs": 120000}, reason="Run the project test command requested by the user.")]
             if self.desired_path:
                 mock_content = (
                     "globalThis.__forgeMock = true;\n"
@@ -580,6 +588,10 @@ class MockAgent:
                 self.stage = "complete"
                 self.steps[3]["status"] = "complete"
                 return [event("agent.text", self.session_id, text="The targeted verification command failed. Forge will preserve the failure evidence."), event("agent.checklist", self.session_id, items=task_checklist("summarize", completed={"inspect", "plan", "approve", "change"}, blocked={"verify"})), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "blocked"}, {"key": "current-step", "value": "Targeted verification failed", "status": "blocked"}, {"key": "inspection", "value": "Relevant context reviewed", "status": "done"}, {"key": "change", "value": f"Created {self.desired_path}" if self.desired_path else "No mutation", "status": "done"}, {"key": "verification", "value": check["status"], "status": "blocked"}]), event("session.complete", self.session_id, status="failed", summary="The bounded targeted verification command failed.", changedFiles=self.changed_files, checks=self.verification_checks)]
+            if self.test_requested:
+                self.stage = "complete"
+                self.steps[3]["status"] = "complete"
+                return [event("agent.text", self.session_id, text="The requested project test command finished. Forge will report its actual exit result."), event("agent.checklist", self.session_id, items=task_checklist("summarize", completed={"inspect", "plan", "verify"})), event("session.complete", self.session_id, status="completed", summary=f"Ran {self.verification_command or 'the project test command'} and recorded the actual result.", changedFiles=self.changed_files, checks=self.verification_checks)]
             if self.verification_round == 0:
                 self.verification_round = 1
                 return [event("agent.text", self.session_id, text="Targeted verification passed. I am requesting a separate broad project check before summarizing."), event("agent.checklist", self.session_id, items=task_checklist("verify", completed={"inspect", "plan", "approve", "change"})), event("agent.scratchpad", self.session_id, items=[{"key": "task", "value": self.prompt, "status": "active"}, {"key": "current-step", "value": "Run broad project verification", "status": "active"}, {"key": "inspection", "value": "Relevant context reviewed", "status": "done"}, {"key": "change", "value": f"Created {self.desired_path}", "status": "done"}, {"key": "verification", "value": "Targeted check passed; broad check pending", "status": "active"}]), event("tool.proposal", self.session_id, tool="process.run", risk="local-execution", arguments={"command": sys.executable, "args": ["-c", "print('full test')"], "timeoutMs": 10000}, reason="Run a separate broad project test after the targeted check passed.")]

@@ -64,6 +64,7 @@ Usage:
   forge init [--workspace <path>]         Run safe first-run onboarding checks
   forge doctor [--repair]                Check runtime; print safe repair guidance
   forge providers                         List supported provider configuration paths
+  forge setup                             Check provider readiness and show next steps
   forge status [--workspace <path>]         Show compact read-only runtime status
   forge errors                            Print stable exit and error-code reference
   forge config show|path|set <key> <v>   Inspect or update local configuration
@@ -97,6 +98,7 @@ Options:
   --policy safe           Use the default approval policy (default)
   --simple               Use readable line-by-line output (alias for --ui text)
   --ui text|tui           Choose readable output or the optional full-screen terminal UI (default: text)
+  --verbose               Show internal phases, artifacts, budgets, and detailed diagnostics
   --multi-agent          Enable bounded built-in and supervisor-created specialist delegation
   --parallel-readonly    Run eligible read-only specialists concurrently with no tools (opt-in)
   --max-agents <n>       Limit delegated specialist roles (default: 5, hard max: 8)
@@ -126,6 +128,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     "init",
     "doctor",
     "providers",
+    "setup",
     "status",
     "errors",
     "config",
@@ -165,6 +168,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     "approve-all",
     "enable",
     "push",
+    "verbose",
   ]);
   for (let index = 0; index < args.length; index += 1) {
     const token = args[index];
@@ -249,7 +253,7 @@ export function boundedFlagInt(
     : fallback;
 }
 
-function renderEvent(event: ForgeEvent, json: boolean): void {
+function renderEvent(event: ForgeEvent, json: boolean, verbose = false): void {
   if (json) {
     process.stdout.write(`${JSON.stringify(event)}\n`);
     return;
@@ -259,6 +263,14 @@ function renderEvent(event: ForgeEvent, json: boolean): void {
       console.log(`\n${event.text}`);
       break;
     case "agent.checklist":
+      if (!verbose) {
+        const active = event.items.find((item) => item.status === "active");
+        const blocked = event.items.find((item) => item.status === "blocked");
+        console.log(
+          `[PROGRESS] ${blocked ? `Blocked: ${blocked.label}` : active ? active.label : "Workflow updated"}`,
+        );
+        break;
+      }
       console.log("\nChecklist:");
       event.items.forEach((item) =>
         console.log(
@@ -276,6 +288,7 @@ function renderEvent(event: ForgeEvent, json: boolean): void {
       console.log(
         `\n[${userFacingStage(event.phase).toUpperCase()}] ${userFacingOutcome(event.status).toUpperCase()} — ${event.note}`,
       );
+      if (!verbose) break;
       console.log(`Internal phase: ${event.phase} (${event.artifact})`);
       console.log(`Artifact: ${event.artifactId}`);
       console.log(`Required: ${event.requiredArtifact}`);
@@ -286,6 +299,7 @@ function renderEvent(event: ForgeEvent, json: boolean): void {
       );
       break;
     case "agent.graph":
+      if (!verbose) break;
       console.log(
         `\nDependency graph: ${event.status} (${event.steps.filter((step) => step.status === "completed").length}/${event.steps.length} complete)`,
       );
@@ -316,6 +330,10 @@ function renderEvent(event: ForgeEvent, json: boolean): void {
       if (event.error) console.log(`Artifact error: ${event.error}`);
       break;
     case "agent.plan":
+      if (!verbose) {
+        console.log(`[PLAN] ${event.goal}`);
+        break;
+      }
       console.log("\nPlan:");
       console.log(`Goal: ${event.goal}`);
       event.steps.forEach((step) =>
@@ -399,8 +417,8 @@ async function statusCommand(args: ParsedArgs): Promise<number> {
     compatible: ["FORGE_API_KEY", "OPENAI_API_KEY"],
   };
   const credentialConfigured =
-    provider === "mock" ||
-    provider === "test" ||
+    provider !== "mock" &&
+    provider !== "test" &&
     (providerKeys[provider] ?? ["FORGE_API_KEY", "OPENAI_API_KEY"]).some(
       (key) => Boolean(process.env[key]),
     );
@@ -499,6 +517,58 @@ async function errorsCommand(args: ParsedArgs): Promise<number> {
     return 2;
   }
   console.log(JSON.stringify(errorReference(), null, 2));
+  return 0;
+}
+
+async function setupCommand(): Promise<number> {
+  const provider = (process.env.FORGE_PROVIDER ?? "mock").toLowerCase();
+  const hasKey = Boolean(
+    process.env.FORGE_API_KEY ||
+    process.env.OPENAI_API_KEY ||
+    process.env.OPENROUTER_API_KEY ||
+    process.env.GROQ_API_KEY ||
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.GOOGLE_AI_STUDIO_API_KEY ||
+    process.env.XAI_API_KEY ||
+    process.env.REQUESTY_API_KEY,
+  );
+  console.log("Forge setup");
+  console.log("============");
+  if (provider === "mock" || provider === "test") {
+    console.log("Current provider: offline mock");
+    console.log(
+      "Status: ready for demonstrations and read-only inspection only.",
+    );
+    console.log(
+      "Important: offline mock mode cannot reliably reason through or complete general coding tasks.",
+    );
+    console.log(
+      "\nTo use a real provider, set a provider and API key, for example:",
+    );
+    console.log("  $env:FORGE_PROVIDER = 'openai-compatible'");
+    console.log("  $env:FORGE_API_KEY = 'your-key'");
+    console.log("  $env:FORGE_MODEL = 'gpt-4.1-mini'");
+    console.log("\nThen test readiness with:");
+    console.log("  forge status");
+    return 0;
+  }
+  console.log(`Current provider: ${provider}`);
+  console.log(
+    `Credential: ${hasKey ? "configured (value hidden)" : "missing"}`,
+  );
+  if (!hasKey) {
+    console.log(
+      "Next step: set the provider’s API-key environment variable, then run `forge setup` again.",
+    );
+    return 1;
+  }
+  console.log(
+    "Status: credential detected. Forge will test the provider when a session starts.",
+  );
+  console.log(
+    'Next step: forge "Inspect this repository and explain its architecture"',
+  );
   return 0;
 }
 
@@ -2508,7 +2578,7 @@ async function runTask(
       signal: cancellation.signal,
       onEvent: (event: ForgeEvent) => {
         if (tui) tui.handle(event);
-        else renderEvent(event, isJson);
+        else renderEvent(event, isJson, args.flags.verbose === true);
       },
       ...(approve ? { approve } : {}),
       ...(args.flags["multi-agent"] === true
@@ -2621,6 +2691,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (args.command === "init") return initCommand(args);
   if (args.command === "doctor") return doctor(args);
   if (args.command === "providers") return providersCommand();
+  if (args.command === "setup") return setupCommand();
   if (args.command === "status") return statusCommand(args);
   if (args.command === "errors") return errorsCommand(args);
   if (args.command === "config") return configCommand(args);

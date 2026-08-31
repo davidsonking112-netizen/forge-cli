@@ -100,7 +100,22 @@ node dist/apps/forge-cli/src/main.js --simple
 
 `--output json` remains machine-readable JSONL and never activates the full-screen renderer.
 
-Use the offline mock provider by default, or configure an OpenAI-compatible provider:
+Use the offline mock provider by default, or configure a real provider. Start with the guided readiness check:
+
+```bash
+forge setup
+```
+
+Offline mock mode is useful for demonstrations and bounded read-only inspection, but it cannot reliably reason through or complete general coding tasks. For real task execution, configure a provider and key, for example:
+
+```powershell
+$env:FORGE_PROVIDER = 'openai-compatible'
+$env:FORGE_API_KEY = 'your-key'
+$env:FORGE_MODEL = 'gpt-4.1-mini'
+forge setup
+```
+
+Forge uses concise line-by-line output by default. Use `--verbose` for internal phases, artifacts, budgets, and detailed diagnostics, `--output json` for machine-readable events, or `--ui tui` for the optional full-screen terminal interface.
 
 ```bash
 FORGE_PROVIDER=openai-compatible \

@@ -900,7 +900,7 @@ test("forge status summarizes safe local state without secrets", async () => {
     assert.equal(status.readOnly, true);
     assert.equal(status.workspace, root);
     assert.equal(status.provider.name, "mock");
-    assert.equal(status.provider.credentialConfigured, true);
+    assert.equal(status.provider.credentialConfigured, false);
     assert.equal(status.policy.mode, "safe");
     assert.equal(status.policy.profile, "local-test");
     assert.equal(status.session, null);
