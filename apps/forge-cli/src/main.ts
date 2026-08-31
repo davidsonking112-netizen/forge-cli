@@ -13,6 +13,11 @@ import type {
   ToolProposalEvent,
 } from "../../../packages/protocol/src/index.js";
 import { ForgeSupervisor } from "./supervisor.js";
+import {
+  actionLevelForTool,
+  userFacingOutcome,
+  userFacingStage,
+} from "./execution-state.js";
 import { SessionStore, type SessionRecord } from "./sessions.js";
 import {
   buildRepositoryContext,
@@ -257,8 +262,9 @@ function renderEvent(event: ForgeEvent, json: boolean): void {
       break;
     case "agent.state":
       console.log(
-        `\n[forge state] ${event.phase.toUpperCase()} — ${event.status} (${event.artifact})`,
+        `\n[${userFacingStage(event.phase).toUpperCase()}] ${userFacingOutcome(event.status).toUpperCase()} — ${event.note}`,
       );
+      console.log(`Internal phase: ${event.phase} (${event.artifact})`);
       console.log(`Artifact: ${event.artifactId}`);
       console.log(`Required: ${event.requiredArtifact}`);
       console.log(`Exit: ${event.exitCondition}`);
@@ -309,20 +315,23 @@ function renderEvent(event: ForgeEvent, json: boolean): void {
         console.log(`Verify: ${event.verification.join("; ")}`);
       break;
     case "tool.proposal":
-      console.log(`\n[tool proposal] ${event.tool} (${event.risk})`);
+      console.log(
+        `\n[ACTION REQUIRED] ${actionLevelForTool(event.tool).toUpperCase()} — ${event.tool}`,
+      );
+      console.log(`Risk detail: ${event.risk}`);
       console.log(`Reason: ${event.reason}`);
       console.log(`Arguments: ${JSON.stringify(event.arguments)}`);
       break;
     case "tool.result":
       console.log(
-        `[tool ${event.ok ? "ok" : "failed"}] ${event.tool} (${event.durationMs}ms)`,
+        `[${actionLevelForTool(event.tool).toUpperCase()} ${event.ok ? "OK" : "FAILED"}] ${event.tool} (${event.durationMs}ms)`,
       );
       if (!event.ok && event.error)
         console.log(`  ${event.error.code}: ${event.error.message}`);
       break;
     case "session.complete":
       console.log(
-        `\n${event.status === "completed" ? "Completed" : event.status}: ${event.summary}`,
+        `\n[REPORT — ${event.status === "completed" ? "DONE" : event.status.toUpperCase()}] ${event.summary}`,
       );
       if (event.changedFiles.length)
         console.log(`Changed files: ${event.changedFiles.join(", ")}`);

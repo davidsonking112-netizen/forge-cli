@@ -20,6 +20,32 @@ export type ExecutionPhase =
   | "summarize";
 
 export type ExecutionStatus = "active" | "blocked" | "completed" | "failed";
+export type UserFacingStage = "understand" | "act" | "verify" | "report";
+export type ActionLevel = "read" | "write" | "run";
+
+export function userFacingStage(phase: ExecutionPhase): UserFacingStage {
+  if (["intake", "inspect", "plan", "milestone"].includes(phase))
+    return "understand";
+  if (["implement", "repair"].includes(phase)) return "act";
+  if (["targeted-verify", "evidence", "full-verify"].includes(phase))
+    return "verify";
+  return "report";
+}
+
+export function actionLevelForTool(tool: ToolName): ActionLevel {
+  if (READ_TOOLS.has(tool)) return "read";
+  if (MUTATION_TOOLS.has(tool)) return "write";
+  return "run";
+}
+
+export function userFacingOutcome(
+  status: ExecutionStatus,
+): "done" | "blocked" | "failed" | "cancelled" | "active" {
+  if (status === "completed") return "done";
+  if (status === "blocked") return "blocked";
+  if (status === "failed") return "failed";
+  return "active";
+}
 
 export interface ExecutionBudget {
   providerTurns: number;
@@ -215,7 +241,7 @@ export class ImplementationStateMachine {
   ) {
     this.intent = classifyTaskIntent(prompt);
     this.requiresMutation =
-      this.intent.mode === "mutation" && this.intent.allowsMutation;
+      this.intent.mode === "change" && this.intent.allowsMutation;
     this.maxTransitions = options.maxTransitions ?? 128;
     this.snapshot = this.makeSnapshot(
       "intake",
@@ -304,7 +330,7 @@ export class ImplementationStateMachine {
     if (MUTATION_TOOLS.has(tool) && !this.intent.allowsMutation)
       return {
         ok: false,
-        reason: `This task is ${this.intent.mode}-only; Forge will not accept a workspace mutation proposal for it.`,
+        reason: `This task is ${this.intent.mode}-only; Forge will not accept a workspace change for it.`,
       };
     if (
       MUTATION_TOOLS.has(tool) &&
@@ -342,13 +368,13 @@ export class ImplementationStateMachine {
       if (!this.planReady)
         return {
           ok: false,
-          reason: "Mutation task completed without an execution-plan artifact.",
+          reason: "Change task completed without an execution-plan artifact.",
         };
       if (!this.mutationApplied || event.changedFiles.length === 0)
         return {
           ok: false,
           reason:
-            "Mutation task completed without a successful approved change and changed-file evidence.",
+            "Change task completed without a successful approved change and changed-file evidence.",
         };
       if (
         this.pendingMilestoneVerifications > 0 ||
@@ -360,14 +386,13 @@ export class ImplementationStateMachine {
         return {
           ok: false,
           reason:
-            "Mutation task completed without passing supervisor milestone verification for every mutation plus both targeted and full verification evidence.",
+            "Change task completed without passing supervisor milestone verification for every change plus both targeted and full verification evidence.",
         };
-    } else if (this.intent.mode === "proposal") {
+    } else if (this.intent.mode === "plan") {
       if (!this.planReady)
         return {
           ok: false,
-          reason:
-            "Proposal-only task completed without an execution-plan artifact.",
+          reason: "Plan task completed without an execution-plan artifact.",
         };
     } else if (!this.inspectionEvidence && !this.planReady) {
       return {

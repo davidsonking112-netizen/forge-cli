@@ -1,5 +1,4 @@
-export type TaskIntentMode =
-  "answer" | "inspect" | "plan" | "proposal" | "mutation";
+export type TaskIntentMode = "answer" | "inspect" | "plan" | "change";
 
 export interface TaskIntent {
   mode: TaskIntentMode;
@@ -50,10 +49,10 @@ function result(
   rationale: string,
   overrides: Partial<TaskIntent> = {},
 ): TaskIntent {
-  const allowsMutation = mode === "mutation";
+  const allowsMutation = mode === "change";
   return {
     mode,
-    requiresApproval: allowsMutation || mode === "proposal",
+    requiresApproval: allowsMutation,
     allowsMutation,
     allowsLocalExecution: false,
     confidence,
@@ -101,7 +100,7 @@ export function classifyTaskIntent(prompt: string): TaskIntent {
   // clearly and directly phrased as an imperative authorization.
   if (hasReadOnly && !hasPositiveMutation) {
     return result(
-      hasProposal ? "proposal" : hasPlan ? "plan" : "inspect",
+      hasProposal || hasPlan ? "plan" : "inspect",
       "explicit",
       signals,
       hasProposal
@@ -113,7 +112,7 @@ export function classifyTaskIntent(prompt: string): TaskIntent {
 
   if (hasProposal) {
     return result(
-      "proposal",
+      "plan",
       "explicit",
       signals,
       "The request asks for a recommendation or proposed change rather than authorizing mutation.",
@@ -131,7 +130,7 @@ export function classifyTaskIntent(prompt: string): TaskIntent {
 
   if (hasPositiveMutation && hasMutation) {
     return result(
-      "mutation",
+      "change",
       "explicit",
       signals,
       "The request explicitly authorizes Forge to change workspace state.",
@@ -151,7 +150,7 @@ export function classifyTaskIntent(prompt: string): TaskIntent {
 
   if (hasMutation) {
     return result(
-      "mutation",
+      "change",
       "inferred",
       signals,
       "Mutation vocabulary is present without an explicit restriction, so Forge treats it as a requested change and still approval-gates execution.",

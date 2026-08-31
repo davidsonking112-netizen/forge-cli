@@ -158,6 +158,19 @@ Configure a non-authoritative user preference for provider sessions with `forge 
 
 Daytona support is optional and credential-free by default. Set `DAYTONA_API_KEY` in the execution environment without committing it, then use `forge daytona status`, `forge daytona create`, or `forge daytona cleanup <sandbox-id> --action stop|delete`. Creation and cleanup require an interactive `YES`; `delete` is never automatic. For an existing sandbox associated with a run, use `--daytona-sandbox <id> --daytona-cleanup stop|delete`; the cleanup action remains explicit and is logged by the command output. Set `DAYTONA_API_URL` only when using a compatible Daytona API endpoint.
 
+## User-facing taxonomy
+
+Forge keeps its internal safety and execution detail, but normal output uses four compact concepts:
+
+| Concept      | Values                                   |
+| ------------ | ---------------------------------------- |
+| Task mode    | `Answer`, `Inspect`, `Plan`, `Change`    |
+| Work stage   | `Understand`, `Act`, `Verify`, `Report`  |
+| Action level | `Read`, `Write`, `Run`                   |
+| Outcome      | `Done`, `Blocked`, `Failed`, `Cancelled` |
+
+Detailed provider roles, lifecycle phases, risk classes, repair strategies, and structured error codes remain available in JSONL, `forge inspect`, and audit output. They are diagnostic metadata, not vocabulary users need to memorize. The terminal renderer maps internal phases to the four work stages and tool risks to the three action levels.
+
 ## Safety model
 
 Forge starts in read-only exploration mode. File writes and command execution are gated, bounded, and visible. Unified-diff changes are path- and context-validated, checkpointed, and approval-gated. Repository instruction files, policy packs, extension manifests, MCP metadata, and provider responses are untrusted data and cannot lower the global safety ceiling. Forge does not persist provider credentials, does not expose common secret files by default, and never performs a GitHub push implicitly; explicit GitHub pushes require a user-confirmed command.
