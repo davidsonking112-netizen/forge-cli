@@ -147,6 +147,11 @@ def hierarchical_context_summary(context: dict[str, Any], max_chars: int) -> str
     return json.dumps(selected, ensure_ascii=False, separators=(",", ":"))[:max_chars]
 
 
+def provider_error_is_permanent(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in ("http 400", "http 401", "http 403", "http 404", "http 429", "quota", "resource_exhausted", "concurrent requests", "model not found", "invalid api key"))
+
+
 def high_risk_goal(prompt: str) -> bool:
     return bool(re.search(r"\b(create|write|edit|modify|delete|remove|run|execute|commit|push|deploy|install|migrate)\b", prompt, re.IGNORECASE))
 
@@ -217,6 +222,7 @@ class MockAgent:
     mutation_applied: bool = False
     turn_count: int = 0
     repair_attempts: int = 0
+    provider_attempts: int = 0
     verification_round: int = 0
     read_only_limit: int = 6
     read_only_actions: int = 0
@@ -340,14 +346,19 @@ class MockAgent:
         if self.provider is None:
             return [event("error", self.session_id, error={"code": "PROVIDER_UNAVAILABLE", "message": "No provider is configured.", "retryable": False}), event("session.complete", self.session_id, status="failed", summary="No provider is configured for this session.", changedFiles=self.changed_files, checks=self.verification_checks)]
         self.turn_count += 1
+        self.provider_attempts += 1
+        max_provider_attempts = bounded_int("FORGE_MAX_PROVIDER_ATTEMPTS", 5, 1, 5)
+        if self.provider_attempts > max_provider_attempts:
+            return [event("session.complete", self.session_id, status="failed", summary=f"The provider attempt budget ({max_provider_attempts}) was reached; Forge stopped without claiming success.", changedFiles=self.changed_files, checks=self.verification_checks)]
         if self.turn_count > bounded_int("FORGE_MAX_HORIZON_TURNS", 12, 1, 64):
             return [event("session.complete", self.session_id, status="failed", summary="The bounded long-horizon turn budget was reached.", changedFiles=self.changed_files, checks=self.verification_checks)]
         streamed: list[str] = []
         try:
             reply = self.provider.complete(messages=self._snapshot_messages(), tools=TOOL_SCHEMAS, on_text=streamed.append)
         except Exception as exc:
-            failure = event("error", self.session_id, error={"code": "PROVIDER_ERROR", "message": redact_error(str(exc)), "retryable": True})
-            return [failure] + self._handle_provider_failure({"ok": False, "error": {"code": "PROVIDER_ERROR", "message": redact_error(str(exc)), "retryable": True}})
+            message = redact_error(str(exc))
+            failure = event("error", self.session_id, error={"code": "PROVIDER_ERROR", "message": message, "retryable": not provider_error_is_permanent(message)})
+            return [failure] + self._handle_provider_failure({"ok": False, "error": {"code": "PROVIDER_ERROR", "message": message, "retryable": not provider_error_is_permanent(message)}})
         responses: list[dict[str, Any]] = []
         if reply.text and not streamed:
             responses.append(event("agent.text", self.session_id, text=reply.text))
@@ -497,6 +508,12 @@ class MockAgent:
 
     def _handle_provider_failure(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
+        failure = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+        failure_message = str(failure.get("message", ""))
+        if failure_message and not bool(failure.get("retryable", True)):
+            return [event("session.complete", self.session_id, status="blocked", summary=f"Provider blocked the task without retrying: {failure_message}", changedFiles=self.changed_files, checks=self.verification_checks)]
+        if provider_error_is_permanent(failure_message):
+            return [event("session.complete", self.session_id, status="blocked", summary=f"Provider limit or configuration blocked the task; Forge did not retry: {failure_message}", changedFiles=self.changed_files, checks=self.verification_checks)]
         if self.repair_attempts:
             events.append(event("agent.repair", self.session_id, attempt=self.repair_attempts, maxAttempts=4, strategy="deep-thinking" if self.repair_attempts == 4 else "alternate", status="failed", reason="The attempted repair did not produce a successful tool result."))
         if self.repair_attempts >= 4:

@@ -44,6 +44,10 @@ run(
   python,
   ["-m", "unittest", "discover", "-s", "python/tests", "-p", "test_*.py"],
   {
-    env: { ...process.env, PYTHONPATH: pythonPath },
+    env: {
+      ...process.env,
+      PYTHONPATH: pythonPath,
+      FORGE_PROVIDER_RETRY_WAIT: "0",
+    },
   },
 );

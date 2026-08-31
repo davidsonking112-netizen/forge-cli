@@ -272,6 +272,28 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(completion["status"], "failed")
         self.assertIn("no text", completion["summary"])
 
+    def test_permanent_provider_quota_error_stops_without_retry(self):
+        class QuotaProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, *, messages, tools, on_text=None):
+                del messages, tools, on_text
+                self.calls += 1
+                raise RuntimeError("Provider HTTP 429: quota exhausted")
+
+        provider = QuotaProvider()
+        agent = MockAgent("provider-quota")
+        agent.provider = provider
+        agent.prompt = "Inspect the repository."
+        with mock.patch.dict(os.environ, {"FORGE_PROVIDER_RETRY_WAIT": "0"}, clear=False):
+            events = agent.provider_turn()
+
+        self.assertEqual(provider.calls, 1)
+        completion = next(item for item in events if item.get("type") == "session.complete")
+        self.assertEqual(completion["status"], "blocked")
+        self.assertIn("without retrying", completion["summary"])
+
     def test_provider_errors_retry_five_times_then_fail(self):
         class FailingProvider:
             def __init__(self):

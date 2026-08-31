@@ -306,5 +306,5 @@ def build_provider() -> Provider:
         reasoning_effort = os.environ.get("FORGE_REASONING_EFFORT", "low").strip().lower()
         if reasoning_effort not in {"low", "medium", "high"}:
             reasoning_effort = None
-        return OpenAICompatibleProvider(api_key=api_key, base_url=base_url, model=model, timeout=bounded_env_float("FORGE_PROVIDER_TIMEOUT", 90.0, 10.0, 300.0), max_tokens=max_tokens, reasoning_effort=reasoning_effort, max_retries=bounded_env_int("FORGE_PROVIDER_RETRIES", 2, 0, 5), token_parameter=token_parameter, headers={"HTTP-Referer": os.environ.get("FORGE_HTTP_REFERER", ""), "X-OpenRouter-Title": os.environ.get("FORGE_APP_NAME", "Forge CLI")})
+        return OpenAICompatibleProvider(api_key=api_key, base_url=base_url, model=model, timeout=bounded_env_float("FORGE_PROVIDER_TIMEOUT", 90.0, 10.0, 300.0), max_tokens=max_tokens, reasoning_effort=reasoning_effort, max_retries=bounded_env_int("FORGE_PROVIDER_RETRIES", 0, 0, 5), token_parameter=token_parameter, headers={"HTTP-Referer": os.environ.get("FORGE_HTTP_REFERER", ""), "X-OpenRouter-Title": os.environ.get("FORGE_APP_NAME", "Forge CLI")})
     raise ValueError(f"Unsupported FORGE_PROVIDER: {provider_name}")

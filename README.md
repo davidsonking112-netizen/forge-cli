@@ -117,15 +117,16 @@ forge setup
 
 Forge uses concise line-by-line output by default. Use `--verbose` for internal phases, artifacts, budgets, and detailed diagnostics, `--output json` for machine-readable events, or `--ui tui` for the optional full-screen terminal interface.
 
-Provider failures are retried with a visible bounded wait. Configure the response timeout, retry count, and wait interval when using a slow or busy provider:
+Transient provider failures are retried with a visible bounded wait. Use one total-attempt budget so `FORGE_MAX_PROVIDER_ATTEMPTS=1` means exactly one provider attempt:
 
 ```powershell
 $env:FORGE_PROVIDER_TIMEOUT = "180"
-$env:FORGE_PROVIDER_RETRIES = "4"
+$env:FORGE_MAX_PROVIDER_ATTEMPTS = "2"
 $env:FORGE_PROVIDER_RETRY_WAIT = "30"
+$env:FORGE_PROVIDER_RETRIES = "0"
 ```
 
-Forge stops after five total provider attempts and reports the failure rather than retrying forever. If a session stops or fails, continue the latest saved session with:
+Temporary timeouts and 5xx responses may retry. Quota exhaustion, account concurrency limits, authentication failures, invalid models, and other permanent provider errors stop immediately without wasting requests. If a session stops or fails, continue the latest saved session with:
 
 ```powershell
 forge continue
