@@ -96,6 +96,23 @@ test("process failures and timeouts become bounded tool failures", async () => {
   }
 });
 
+test("process commands with embedded arguments are normalized safely", async () => {
+  const root = await fixture();
+  try {
+    const result = await new WorkspaceTools(root).execute({
+      tool: "process.run",
+      arguments: {
+        command: `${process.execPath} -e "process.stdout.write('ok')"`,
+        timeoutMs: 3000,
+      },
+    });
+    assert.equal(result.ok, true);
+    assert.match(result.output?.output ?? "", /ok/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("missing Git is reported as an unavailable optional capability", async () => {
   const root = await fixture();
   const previousPath = process.env.PATH;

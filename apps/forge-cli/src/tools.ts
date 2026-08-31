@@ -1062,9 +1062,16 @@ export class WorkspaceTools {
     args: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<{ command: string; exitCode: number; output: string }> {
-    const command = String(args.command ?? "");
+    let command = String(args.command ?? "").trim();
     if (!command) throw new Error("Command is required");
-    const commandArgs = Array.isArray(args.args) ? args.args.map(String) : [];
+    let commandArgs = Array.isArray(args.args) ? args.args.map(String) : [];
+    if (!commandArgs.length && /\s/.test(command)) {
+      const tokens = command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
+      command = tokens.shift() ?? command;
+      commandArgs = tokens.map((token) => token.replace(/^("|')|("|')$/g, ""));
+    }
+    if (process.platform === "win32" && /^(npm|npx|yarn|pnpm)$/i.test(command))
+      command = `${command}.cmd`;
     const timeoutMs = boundedInt(
       args.timeoutMs ?? 30_000,
       30_000,
@@ -1084,7 +1091,9 @@ export class WorkspaceTools {
     return await new Promise((resolve, reject) => {
       const child = spawn(command, commandArgs, {
         cwd: this.root,
-        shell,
+        shell:
+          shell ||
+          (process.platform === "win32" && /\.(cmd|bat)$/i.test(command)),
         env: safeChildEnvironment(),
         windowsHide: true,
       });
