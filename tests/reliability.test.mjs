@@ -44,7 +44,10 @@ test("strong models can use a wider but still evidence-gated envelope", () => {
 });
 
 test("repeated failures trigger escalation instead of blind retries", () => {
-  const profile = createCapabilityProfile("weak-debugger", { debugging: 0.4, recovery: 0.4 });
+  const profile = createCapabilityProfile("weak-debugger", {
+    debugging: 0.4,
+    recovery: 0.4,
+  });
   const policy = deriveReliabilityPolicy(profile);
   const decision = decideEscalation(profile, policy, 2, "medium");
   assert.equal(decision.escalate, true);
@@ -52,7 +55,10 @@ test("repeated failures trigger escalation instead of blind retries", () => {
 });
 
 test("high-risk work with weak verification requires review", () => {
-  const profile = createCapabilityProfile("weak-verifier", { verification: 0.5, recovery: 0.9 });
+  const profile = createCapabilityProfile("weak-verifier", {
+    verification: 0.5,
+    recovery: 0.9,
+  });
   const policy = deriveReliabilityPolicy(profile);
   const decision = decideEscalation(profile, policy, 0, "high");
   assert.equal(decision.escalate, true);
@@ -71,13 +77,21 @@ test("capability observations improve the profile conservatively", () => {
 });
 
 test("claim fingerprints are deterministic and summaries never self-certify empty evidence", () => {
-  const claim = { claim: "tests passed", type: "test-passed", subject: "npm test" };
+  const claim = {
+    claim: "tests passed",
+    type: "test-passed",
+    subject: "npm test",
+  };
   assert.equal(claimFingerprint(claim), claimFingerprint({ ...claim }));
   assert.equal(summarizeClaimResults([]).complete, false);
   assert.deepEqual(
     summarizeClaimResults([
       { claim, verified: true, evidence: "exit 0" },
-      { claim: { ...claim, subject: "npm run typecheck" }, verified: false, evidence: "exit 1" },
+      {
+        claim: { ...claim, subject: "npm run typecheck" },
+        verified: false,
+        evidence: "exit 1",
+      },
     ]),
     { verified: 1, rejected: 1, complete: false },
   );
