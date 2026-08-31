@@ -214,7 +214,8 @@ export class ImplementationStateMachine {
     } = {},
   ) {
     this.intent = classifyTaskIntent(prompt);
-    this.requiresMutation = this.intent.mode === "mutation" && this.intent.allowsMutation;
+    this.requiresMutation =
+      this.intent.mode === "mutation" && this.intent.allowsMutation;
     this.maxTransitions = options.maxTransitions ?? 128;
     this.snapshot = this.makeSnapshot(
       "intake",
@@ -303,8 +304,7 @@ export class ImplementationStateMachine {
     if (MUTATION_TOOLS.has(tool) && !this.intent.allowsMutation)
       return {
         ok: false,
-        reason:
-          `This task is ${this.intent.mode}-only; Forge will not accept a workspace mutation proposal for it.`,
+        reason: `This task is ${this.intent.mode}-only; Forge will not accept a workspace mutation proposal for it.`,
       };
     if (
       MUTATION_TOOLS.has(tool) &&
@@ -366,7 +366,8 @@ export class ImplementationStateMachine {
       if (!this.planReady)
         return {
           ok: false,
-          reason: "Proposal-only task completed without an execution-plan artifact.",
+          reason:
+            "Proposal-only task completed without an execution-plan artifact.",
         };
     } else if (!this.inspectionEvidence && !this.planReady) {
       return {

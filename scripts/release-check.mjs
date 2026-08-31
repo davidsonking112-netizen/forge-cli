@@ -29,7 +29,9 @@ run(npm, ["run", "format:check"]);
 run(npm, ["run", "typecheck"]);
 run(npm, ["test"]);
 
-const wheelDirectory = mkdtempSync(path.join(os.tmpdir(), "forge-wheel-check-"));
+const wheelDirectory = mkdtempSync(
+  path.join(os.tmpdir(), "forge-wheel-check-"),
+);
 const cleanVenv = mkdtempSync(path.join(os.tmpdir(), "forge-release-venv-"));
 const venvPython =
   process.platform === "win32"
@@ -56,7 +58,9 @@ try {
   ]);
   run(venvPython, ["-m", "pip", "install", "pip-audit"]);
   run(venvPython, ["-m", "pip_audit", "--desc"]);
-  run(process.execPath, [path.join(root, "scripts", "clean-install-smoke.mjs")]);
+  run(process.execPath, [
+    path.join(root, "scripts", "clean-install-smoke.mjs"),
+  ]);
 } finally {
   rmSync(wheelDirectory, { recursive: true, force: true });
   rmSync(cleanVenv, { recursive: true, force: true });

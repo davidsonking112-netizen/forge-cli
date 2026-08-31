@@ -50,7 +50,10 @@ class _ScenarioHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"data: [DONE]\n\n")
             return
         payload = {"choices": [{"message": {"content": "hello", "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "workspace_read", "arguments": '{"path":"README.md"}'}}]}}], "usage": {"prompt_tokens": 3, "completion_tokens": 2}}
-        self.wfile.write(json.dumps(payload).encode())
+        try:
+            self.wfile.write(json.dumps(payload).encode())
+        except BrokenPipeError:
+            pass
 
 
 class ProviderCompatibilityTests(unittest.TestCase):

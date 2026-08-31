@@ -88,6 +88,8 @@ class LongHorizonBuffer:
         recent_start = self._recent_start(self.messages)
         recent = self.messages[recent_start:]
         omitted = self.messages[2:recent_start]
+        critical = [message for message in omitted if self._priority(message) >= 880]
+        recent = [*critical, *recent]
         ordered = sorted(enumerate(omitted), key=lambda item: (-self._priority(item[1]), item[0]))
         fragments: list[str] = []
         fragment_budget = min(6_500, max(200, self.max_chars // 4))
@@ -181,11 +183,28 @@ class LongHorizonBuffer:
     def _truncate_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result = [dict(message) for message in messages]
         while self._size(result) > self.max_chars:
-            candidates = [index for index, message in enumerate(result) if index >= 2 and isinstance(message.get("content"), str) and message["content"] and not (message.get("role") == "user" and str(message.get("content", "")).startswith(self.SUMMARY_PREFIX))]
+            candidates = [
+                index
+                for index, message in enumerate(result)
+                if index >= 2
+                and isinstance(message.get("content"), str)
+                and message["content"]
+                and not (
+                    message.get("role") == "user"
+                    and str(message.get("content", "")).startswith(self.SUMMARY_PREFIX)
+                )
+                and not (
+                    message.get("role") == "tool"
+                    and self._priority(message) >= 880
+                )
+            ]
             if not candidates: break
             index = min(candidates, key=lambda item: (self._priority(result[item]), -len(str(result[item]["content"]))))
             content = str(result[index]["content"])
-            new_length = max(64, int(len(content) * 0.75))
+            if len(content) <= 64:
+                del result[index]
+                continue
+            new_length = min(len(content) - 1, max(64, int(len(content) * 0.75)))
             result[index]["content"] = content[:new_length]
         return result
 

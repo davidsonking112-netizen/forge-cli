@@ -26,9 +26,10 @@ try {
   const archive = readdirSync(prefix).find((name) => name.endsWith(".tgz"));
   if (!archive) throw new Error("npm pack produced no archive");
   run(npm, ["install", "--prefix", prefix, path.join(prefix, archive)]);
-  const forge = process.platform === "win32"
-    ? path.join(prefix, "node_modules", ".bin", "forge.cmd")
-    : path.join(prefix, "node_modules", ".bin", "forge");
+  const forge =
+    process.platform === "win32"
+      ? path.join(prefix, "node_modules", ".bin", "forge.cmd")
+      : path.join(prefix, "node_modules", ".bin", "forge");
   run(forge, ["--version"]);
   run(forge, ["errors"]);
   console.log("clean package install end-to-end smoke test passed");
