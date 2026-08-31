@@ -18,15 +18,19 @@ const entrypoint = path.join(
 );
 const argv = process.argv.slice(2);
 const simpleMode = argv.includes("--simple");
+const jsonMode =
+  argv.includes("--output=json") ||
+  (argv.includes("--output") && argv[argv.indexOf("--output") + 1] === "json");
+const relayJson = simpleMode && jsonMode;
 
 function normalizedArgv(args) {
   if (!simpleMode) return args;
   const result = [...args];
   if (
-    !result.includes("--output") &&
-    !result.some((value) => value.startsWith("--output="))
+    !result.includes("--ui") &&
+    !result.some((value) => value.startsWith("--ui="))
   ) {
-    result.push("--output", "json");
+    result.push("--ui", "text");
   }
   return result;
 }
@@ -104,11 +108,11 @@ function renderSimpleEvent(event) {
 }
 
 const child = spawn(process.execPath, [entrypoint, ...normalizedArgv(argv)], {
-  stdio: simpleMode ? ["inherit", "pipe", "inherit"] : "inherit",
+  stdio: relayJson ? ["inherit", "pipe", "inherit"] : "inherit",
   windowsHide: true,
 });
 
-if (simpleMode) {
+if (relayJson) {
   const rl = readline.createInterface({ input: child.stdout });
   (async () => {
     for await (const rawLine of rl) {
@@ -132,7 +136,7 @@ child.once("error", (error) => {
   process.exitCode = 1;
 });
 child.once("exit", (code, signal) => {
-  if (simpleMode) flushPendingText();
+  if (relayJson) flushPendingText();
   if (signal) process.exitCode = 128 + (signal === "SIGINT" ? 2 : 15);
   else process.exitCode = code ?? 1;
 });

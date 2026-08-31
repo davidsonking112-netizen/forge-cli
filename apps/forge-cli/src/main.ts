@@ -95,7 +95,8 @@ Options:
   --output text|json     Select rendering mode (default: text)
   --workspace <path>     Set the approved workspace root
   --policy safe           Use the default approval policy (default)
-  --simple               Disable the full-screen terminal workspace
+  --simple               Use readable line-by-line output (alias for --ui text)
+  --ui text|tui           Choose readable output or the optional full-screen terminal UI (default: text)
   --multi-agent          Enable bounded built-in and supervisor-created specialist delegation
   --parallel-readonly    Run eligible read-only specialists concurrently with no tools (opt-in)
   --max-agents <n>       Limit delegated specialist roles (default: 5, hard max: 8)
@@ -154,6 +155,17 @@ function parseArgs(argv: string[]): ParsedArgs {
   const args = command === "interactive" ? argv : rest;
   const positional: string[] = [];
   const flags: Record<string, string | boolean> = {};
+  const booleanFlags = new Set([
+    "help",
+    "version",
+    "simple",
+    "multi-agent",
+    "parallel-readonly",
+    "no-record",
+    "approve-all",
+    "enable",
+    "push",
+  ]);
   for (let index = 0; index < args.length; index += 1) {
     const token = args[index];
     if (!token) continue;
@@ -168,7 +180,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       }
       const key = raw;
       const next = args[index + 1];
-      if (next && !next.startsWith("--")) {
+      if (!booleanFlags.has(key) && next && !next.startsWith("--")) {
         flags[key] = next;
         index += 1;
       } else {
@@ -2388,6 +2400,9 @@ async function runTask(
     args.command === "plan"
       ? args.positional.join(" ")
       : flagString(args.flags, "prompt", args.positional.join(" "));
+  const ui = flagString(args.flags, "ui", "text");
+  if (!["text", "tui"].includes(ui))
+    throw new Error("--ui must be text or tui");
   const interactive = !isJson && Boolean(input.isTTY);
   const rl = interactive ? createInterface({ input, output }) : undefined;
   const cancellation = new AbortController();
@@ -2399,7 +2414,7 @@ async function runTask(
   };
   process.once("SIGINT", onSigint);
   const tui =
-    interactive && args.flags.simple !== true
+    interactive && ui === "tui" && args.flags.simple !== true
       ? new FullScreenTui({
           onCommand: (command) => {
             if (command === "cancel") {
